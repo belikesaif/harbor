@@ -45,6 +45,39 @@ public static class Program
     static Config cfg;
     static readonly List<DockWindow> docks = new();
     static bool cleaned;
+    // Windows sends a burst of display-change notifications while a monitor is (un)plugged; wait for it to settle.
+    static readonly System.Windows.Threading.DispatcherTimer displayDebounce = new() { Interval = TimeSpan.FromMilliseconds(800) };
+
+    static void OnDisplaySettingsChanged(object s, EventArgs e) =>
+        displayDebounce.Dispatcher.BeginInvoke(() => { if (cleaned) return; displayDebounce.Stop(); displayDebounce.Start(); });
+
+    /// <summary>Removes docks whose monitor was disconnected and adds docks for newly connected monitors.</summary>
+    static void SyncDocks()
+    {
+        if (cleaned) return;
+        var monitors = Native.GetMonitors();
+        if (monitors.Count == 0) return; // transient state during a display switch
+
+        foreach (var d in docks.Where(d => !monitors.Any(m => m.Device == d.MonitorDevice)).ToList())
+        {
+            Log.Write("monitor removed: " + d.MonitorDevice);
+            docks.Remove(d);
+            try { d.Cleanup(); } catch (Exception ex) { Log.Write("dock cleanup: " + ex); }
+            try { d.Close(); d.Glass.Close(); } catch (Exception ex) { Log.Write("dock close: " + ex); }
+        }
+
+        foreach (var m in monitors.Where(m => !docks.Any(d => d.MonitorDevice == m.Device)))
+        {
+            if (docks.Count > 0) Log.Write("monitor added: " + m.Device);
+            var glass = new GlassWindow();
+            glass.Show();
+            var dock = new DockWindow(cfg, glass, m) { Owner = glass };
+            dock.Show();
+            docks.Add(dock);
+        }
+
+        TaskbarControl.EnforceHidden(); // Explorer may recreate secondary taskbars on a display change
+    }
 
     [STAThread]
     public static void Main(string[] args)
@@ -75,15 +108,10 @@ public static class Program
         cfg = Config.Load();
         TaskbarControl.Apply(cfg);
 
-        // one dock per monitor
-        foreach (var m in Native.GetMonitors())
-        {
-            var glass = new GlassWindow();
-            glass.Show();
-            var dock = new DockWindow(cfg, glass, m) { Owner = glass };
-            dock.Show();
-            docks.Add(dock);
-        }
+        // one dock per monitor, kept in sync as monitors are connected / disconnected
+        SyncDocks();
+        displayDebounce.Tick += (_, _) => { displayDebounce.Stop(); SyncDocks(); };
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         app.Run();
         Cleanup();
@@ -99,6 +127,7 @@ public static class Program
     {
         if (cleaned) return;
         cleaned = true;
+        try { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged; } catch { }
         foreach (var d in docks) { try { d.Dispatcher.Invoke(d.Cleanup); } catch { } }
         try { TaskbarControl.Restore(cfg); } catch { }
     }

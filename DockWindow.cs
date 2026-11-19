@@ -111,11 +111,15 @@ internal class DockWindow : Window
     }
     double BarH => Base + TopPad + DotRow;
 
-    /// <summary>Looks this dock's monitor up again (resolution/DPI may have changed); falls back to the primary.</summary>
+    public string MonitorDevice => monitorDevice;
+    public GlassWindow Glass => glass;
+
+    /// <summary>Looks this dock's monitor up again (resolution/DPI may have changed). If the monitor is gone we keep
+    /// the last known geometry instead of jumping to another screen; Program removes docks for disconnected monitors.</summary>
     MonitorInfo CurrentMonitor()
     {
-        var all = GetMonitors();
-        mon = all.FirstOrDefault(x => x.Device == monitorDevice) ?? all.FirstOrDefault() ?? mon;
+        var m = GetMonitors().FirstOrDefault(x => x.Device == monitorDevice);
+        if (m != null) mon = m;
         return mon;
     }
 
@@ -846,6 +850,7 @@ internal class DockWindow : Window
     public void Cleanup()
     {
         tick.Stop();
+        debounce.Stop();
         foreach (var h in hooks) if (h != IntPtr.Zero) UnhookWinEvent(h);
         hooks.Clear();
         if (appBarRegistered) { var abd = NewAbd(); SHAppBarMessage(ABM_REMOVE, ref abd); appBarRegistered = false; }
