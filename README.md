@@ -30,7 +30,9 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 | 🧊 **Frosted glass** | Native DWM acrylic blur, clipped to a rounded bar |
 | 🖼️ **Hi-res icons** | 128 px shell icons, including Store/MSIX apps (WhatsApp, Spotify, Photos…) |
 | 🟢 **Running apps** | Indicator dots, click to focus / minimize / cycle windows, right-click window list, Quit |
-| 📅 **Widgets** | Calendar, analog clock, CPU / RAM / battery rings |
+| 🌊 **Top bar (Tide Island)** | Rest the cursor on the top edge: glass pods drop down with tray icons, clock and Wi-Fi / Bluetooth / battery. Hover anything to read its details |
+| 🔔 **Tray icons** | Your apps' tray icons live in the top bar: left-click, right-click menus and double-click work as usual |
+| 📅 **Widgets** | Calendar, digital or analog clock, CPU / RAM / battery rings |
 | 🎵 **Now Playing** | Album art + play/pause/next for any app using Windows media controls |
 | 🖥️ **Multi-monitor** | One dock per screen, per-monitor DPI aware |
 | ✋ **Drag & drop** | Reorder pins, drag off to remove, drop any app/file/folder to pin |
@@ -47,14 +49,17 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 
 ## ⚙️ Settings
 
-Right-click the dock for icon size, magnification, widgets, clock second hand, hiding the Windows taskbar and autostart.
+Right-click the dock for icon size, magnification, widgets, clock style (digital / analog / both), seconds, the top bar, hiding the Windows taskbar and autostart.
 Everything is stored in `%APPDATA%\Harbor\config.json`.
 
-| Shortcut you'll use instead of the tray | |
+| In the top bar | |
 |---|---|
-| `Win + A` | Wi-Fi, volume, battery (Quick Settings) |
-| `Win + N` | Notifications & calendar |
-| `Win + B` | Tray icons |
+| Wi-Fi | Click: network list · right-click: network settings |
+| Bluetooth | Click: device list · right-click: turn on/off · hover: connected devices |
+| Clock | Click: notifications & calendar (`Win + N`) |
+| Tray icon | Click / right-click / double-click just like the taskbar |
+
+Volume lives in Quick Settings (`Win + A`).
 
 ## 🛠️ Build from source
 
@@ -74,8 +79,10 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 | `Widgets.cs` | Calendar, clock, system rings, Now Playing (vector art scaled by `Viewbox`) |
 | `Apps.cs` | Window enumeration (Alt+Tab rules) and matching windows → pinned apps |
 | `Shell.cs` | High-res icons via `IShellItemImageFactory`, shortcut resolution, launching |
+| `TopBar.cs` | Tide Island top bar: edge trigger, pod animations, Wi-Fi / Bluetooth / battery |
+| `TrayHost.cs` | Notification-area host: mirrors app tray icons and forwards everything to Explorer |
 | `Native.cs` | Win32 / DWM / Shell interop |
-| `Program.cs` | Entry point, glass window, one dock per monitor, taskbar restore |
+| `Program.cs` | Entry point, glass window, one dock + top bar per monitor (follows monitors in and out), taskbar restore |
 
 ## 🤝 Contributing
 
