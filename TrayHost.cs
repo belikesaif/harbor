@@ -72,6 +72,17 @@ internal static class TrayHost
         Changed?.Invoke();
     }
 
+    /// <summary>Sends an appbar message straight to Explorer: our tray window steps below Explorer's for the call, so
+    /// shell32's FindWindow("Shell_TrayWnd") reaches Explorer directly (it ignores appbars that arrive via us).</summary>
+    public static IntPtr AppBarMessage(uint msg, ref APPBARDATA abd)
+    {
+        if (hwnd == IntPtr.Zero) return SHAppBarMessage(msg, ref abd);
+        SetWindowPos(hwnd, (IntPtr)(-2) /* HWND_NOTOPMOST */, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, (IntPtr)1 /* HWND_BOTTOM */, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        try { return SHAppBarMessage(msg, ref abd); }
+        finally { BringToTop(); }
+    }
+
     public static bool IsOwnWindow(IntPtr h) => h != IntPtr.Zero && h == hwnd;
 
     static void BringToTop()

@@ -30,7 +30,7 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 | 🧊 **Frosted glass** | Native DWM acrylic blur, clipped to a rounded bar |
 | 🖼️ **Hi-res icons** | 128 px shell icons, including Store/MSIX apps (WhatsApp, Spotify, Photos…) |
 | 🟢 **Running apps** | Indicator dots, click to focus / minimize / cycle windows, right-click window list, Quit |
-| 🌊 **Top bar (Tide Island)** | Rest the cursor on the top edge: glass pods drop down with tray icons, clock and Wi-Fi / Bluetooth / battery. Hover anything to read its details |
+| 🌊 **Top bar (Tide Line)** | A slim frosted strip with tray icons, clock and Wi-Fi / Bluetooth / battery. Its space is reserved like a taskbar, so it never covers browser tabs or title bars. Hover anything to read its details |
 | 🔔 **Tray icons** | Your apps' tray icons live in the top bar: left-click, right-click menus and double-click work as usual |
 | 📅 **Widgets** | Calendar, digital or analog clock, CPU / RAM / battery rings |
 | 🎵 **Now Playing** | Album art + play/pause/next for any app using Windows media controls |
@@ -79,7 +79,7 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 | `Widgets.cs` | Calendar, clock, system rings, Now Playing (vector art scaled by `Viewbox`) |
 | `Apps.cs` | Window enumeration (Alt+Tab rules) and matching windows → pinned apps |
 | `Shell.cs` | High-res icons via `IShellItemImageFactory`, shortcut resolution, launching |
-| `TopBar.cs` | Tide Island top bar: edge trigger, pod animations, Wi-Fi / Bluetooth / battery |
+| `TopBar.cs` | Tide Line top bar: reserved strip (AppBar), clock read-out, Wi-Fi / Bluetooth / battery |
 | `TrayHost.cs` | Notification-area host: mirrors app tray icons and forwards everything to Explorer |
 | `Native.cs` | Win32 / DWM / Shell interop |
 | `Program.cs` | Entry point, glass window, one dock + top bar per monitor (follows monitors in and out), taskbar restore |

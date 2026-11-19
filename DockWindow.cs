@@ -583,7 +583,7 @@ internal class DockWindow : Window
         if (!appBarRegistered)
         {
             var abd = NewAbd(); abd.uCallbackMessage = appBarMsg;
-            SHAppBarMessage(ABM_NEW, ref abd);
+            TrayHost.AppBarMessage(ABM_NEW, ref abd);
             appBarRegistered = true;
         }
         SetAppBarPos();
@@ -600,9 +600,9 @@ internal class DockWindow : Window
         var abd = NewAbd();
         abd.uEdge = ABE_BOTTOM;
         abd.rc = new RECT { Left = b.Left, Top = b.Bottom - reserve, Right = b.Right, Bottom = b.Bottom };
-        SHAppBarMessage(ABM_QUERYPOS, ref abd);
+        TrayHost.AppBarMessage(ABM_QUERYPOS, ref abd);
         abd.rc.Top = abd.rc.Bottom - reserve;
-        SHAppBarMessage(ABM_SETPOS, ref abd);
+        TrayHost.AppBarMessage(ABM_SETPOS, ref abd);
         bottomPx = abd.rc.Bottom;
         PositionWindow();
     }
@@ -839,7 +839,7 @@ internal class DockWindow : Window
             style.Items.Add(Item(n, () => { cfg.ClockStyle = n; cfg.Save(); RebuildCells(); }, true, cfg.ClockStyle == n));
         m.Items.Add(style);
         m.Items.Add(Item("Clock Seconds", () => { cfg.ClockSeconds = !cfg.ClockSeconds; clock.ShowSeconds = digi.ShowSeconds = cfg.ClockSeconds; digi.Update(); cfg.Save(); }, true, cfg.ClockSeconds));
-        m.Items.Add(Item("Top Bar (hover top edge)", () => { cfg.ShowTopBar = !cfg.ShowTopBar; cfg.Save(); Program.ApplyTopBar(); }, true, cfg.ShowTopBar));
+        m.Items.Add(Item("Top Bar", () => { cfg.ShowTopBar = !cfg.ShowTopBar; cfg.Save(); Program.ApplyTopBar(); }, true, cfg.ShowTopBar));
         m.Items.Add(Item("Hide Windows Taskbar", () => { cfg.HideWindowsTaskbar = !cfg.HideWindowsTaskbar; TaskbarControl.Apply(cfg); cfg.Save(); }, true, cfg.HideWindowsTaskbar));
         m.Items.Add(Item("Start with Windows", () => Startup.Toggle(), true, Startup.Enabled));
         m.Items.Add(new Separator());
@@ -864,7 +864,7 @@ internal class DockWindow : Window
         debounce.Stop();
         foreach (var h in hooks) if (h != IntPtr.Zero) UnhookWinEvent(h);
         hooks.Clear();
-        if (appBarRegistered) { var abd = NewAbd(); SHAppBarMessage(ABM_REMOVE, ref abd); appBarRegistered = false; }
+        if (appBarRegistered) { var abd = NewAbd(); TrayHost.AppBarMessage(ABM_REMOVE, ref abd); appBarRegistered = false; }
     }
 }
 
@@ -876,14 +876,14 @@ internal static class TaskbarControl
     static int GetState()
     {
         var abd = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>() };
-        return (int)SHAppBarMessage(ABM_GETSTATE, ref abd);
+        return (int)TrayHost.AppBarMessage(ABM_GETSTATE, ref abd);
     }
 
     static void SetState(int state)
     {
         var main = TrayWindows().FirstOrDefault(h => Native.GetClassName(h) == "Shell_TrayWnd"); // Explorer's, never Harbor's tray host
         var abd = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = main, lParam = (IntPtr)state };
-        SHAppBarMessage(ABM_SETSTATE, ref abd);
+        TrayHost.AppBarMessage(ABM_SETSTATE, ref abd);
     }
 
     public static bool Hidden { get; private set; }

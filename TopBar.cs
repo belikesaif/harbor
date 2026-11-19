@@ -16,37 +16,34 @@ using static Harbor.Native;
 
 namespace Harbor;
 
-/// <summary>"Tide Island": rest the cursor on the top edge and three glass pods (tray · clock · status) drop from the
-/// top centre and slide apart. The centre pod doubles as a read-out: hovering anything shows its details there.
-/// Nothing is drawn while it is closed. The window is hidden and only a cheap cursor check runs.</summary>
+/// <summary>"Tide Line": a slim frosted strip across the top of each monitor, reserved with the AppBar API like a taskbar,
+/// so maximized windows (and Chrome's tabs) start below it and nothing is ever covered. Three pills: tray icons,
+/// a clock that doubles as a read-out (hover anything to see its details there), and Wi-Fi / Bluetooth / battery.
+/// A hairline along the bottom edge fills from left to right as the day passes.</summary>
 internal class TopBar : Window
 {
-    const double PodH = 62, WinH = 84, DropFrom = -96;
-    const int DwellTicks = 3, AwayTicks = 4; // × 90 ms
+    public const double BarH = 30;
+    const double PillH = 24;
 
     readonly string monitorDevice;
     MonitorInfo mon;
     IntPtr hwnd;
-    double dpi = 1, winW = 640;
+    double dpi = 1;
     public string MonitorDevice => monitorDevice;
 
-    readonly StackPanel island = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 8, 0, 0) };
-    readonly TranslateTransform drop = new(0, DropFrom), leftSlide = new(), rightSlide = new();
-    readonly ScaleTransform centerScale = new(1, 1);
-    readonly Border trayPod, clockPod, statusPod;
     readonly StackPanel trayRow = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-    readonly TextBlock time, ampm, readout;
-    readonly Border dayFill;
+    readonly Border trayPill, clockPill, statusPill, dayLine;
+    readonly TextBlock time, date, readout;
+    readonly StackPanel clockRow;
     readonly WifiGlyph wifi = new();
-    readonly TextBlock ethernet, btGlyph;
+    readonly TextBlock ethernet, btGlyph, batText;
     readonly Border wifiChip, btChip, batChip;
     readonly BatteryRing battery = new();
-    readonly TextBlock batText;
 
-    readonly DispatcherTimer poll = new() { Interval = TimeSpan.FromMilliseconds(90) };
     readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromSeconds(1) };
-    int dwell, away;
-    bool open, closing, trayDirty = true;
+    uint appBarMsg;
+    bool appBarRegistered, fullscreen;
+    int tickCount;
     string netLabel = "", btLabel = "", batLabel = "";
 
     static Radio bt;
@@ -57,86 +54,91 @@ internal class TopBar : Window
     {
         mon = monitor; monitorDevice = monitor.Device;
         Title = "Harbor Top Bar";
-        WindowStyle = WindowStyle.None; AllowsTransparency = true; Background = Brushes.Transparent;
-        ResizeMode = ResizeMode.NoResize; ShowInTaskbar = false; Topmost = true; ShowActivated = false;
-        Left = 0; Top = -2000; Width = winW; Height = WinH;
+        WindowStyle = WindowStyle.None; AllowsTransparency = true; ResizeMode = ResizeMode.NoResize;
+        Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)); // acrylic shows through; 1/255 keeps it hit-testable
+        ShowInTaskbar = false; Topmost = true; ShowActivated = false;
+        Left = 0; Top = -2000; Width = 800; Height = BarH;
         UseLayoutRounding = true;
         TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
 
-        // ── tray pod ──
-        trayPod = Pod(trayRow, 56);
-        trayPod.RenderTransform = leftSlide;
+        // ── tray pill (left) ──
+        trayPill = Pill(trayRow);
+        trayPill.HorizontalAlignment = HorizontalAlignment.Left;
+        trayPill.Margin = new Thickness(8, 0, 0, 0);
 
-        // ── clock pod (time · read-out · day progress) ──
-        time = Ui.Text("", 24, Brushes.White, FontWeights.Light);
-        ampm = Ui.Text("", 10.5, Ui.B(0xB3FFFFFF), FontWeights.SemiBold);
-        ampm.VerticalAlignment = VerticalAlignment.Bottom; ampm.Margin = new Thickness(4, 0, 0, 5);
-        var timeRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-        timeRow.Children.Add(time); timeRow.Children.Add(ampm);
-        readout = Ui.Text("", 11, Ui.B(0xC8FFFFFF), FontWeights.Normal);
-        readout.MaxWidth = 260; readout.Margin = new Thickness(0, -3, 0, 0);
-        dayFill = new Border { Height = 3, CornerRadius = new CornerRadius(1.5), HorizontalAlignment = HorizontalAlignment.Left, Background = new LinearGradientBrush(Ui.C(0xFF64D2FF), Ui.C(0xFFBF5AF2), 0) };
-        var dayTrack = new Grid { Width = 150, Height = 3, Margin = new Thickness(0, 5, 0, 0) };
-        dayTrack.Children.Add(new Border { CornerRadius = new CornerRadius(1.5), Background = Ui.B(0x26FFFFFF) });
-        dayTrack.Children.Add(dayFill);
-        var clockStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-        clockStack.Children.Add(timeRow); clockStack.Children.Add(readout); clockStack.Children.Add(dayTrack);
-        clockPod = Pod(clockStack, 210);
-        clockPod.Padding = new Thickness(22, 0, 22, 0);
-        clockPod.RenderTransformOrigin = new Point(0.5, 0.5);
-        clockPod.RenderTransform = centerScale;
-        clockPod.Cursor = Cursors.Hand;
-        Hover(clockPod, () => "Notifications & calendar");
-        clockPod.MouseLeftButtonUp += (_, e) => { e.Handled = true; PressKeys(VK_LWIN, 0x4E /* N */); };
-        clockPod.MouseRightButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-settings:dateandtime"); };
+        // ── clock pill (centre) — also the read-out ──
+        time = Ui.Text("", 12.5, Brushes.White, FontWeights.SemiBold);
+        date = Ui.Text("", 12, Ui.B(0xB3FFFFFF), FontWeights.Normal);
+        date.Margin = new Thickness(8, 0, 0, 0);
+        clockRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        clockRow.Children.Add(time); clockRow.Children.Add(date);
+        readout = Ui.Text("", 12, Brushes.White, FontWeights.Normal);
+        readout.MaxWidth = 420; readout.Opacity = 0;
+        var clockGrid = new Grid { Margin = new Thickness(6, 0, 6, 0) };
+        clockGrid.Children.Add(clockRow); clockGrid.Children.Add(readout);
+        clockPill = Pill(clockGrid);
+        clockPill.HorizontalAlignment = HorizontalAlignment.Center;
+        clockPill.Cursor = Cursors.Hand;
+        Hover(clockPill, () => "Notifications & calendar");
+        clockPill.MouseLeftButtonUp += (_, e) => { e.Handled = true; PressKeys(VK_LWIN, 0x4E /* N */); };
+        clockPill.MouseRightButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-settings:dateandtime"); };
 
-        // ── status pod (Wi-Fi · Bluetooth · battery) ──
-        ethernet = new TextBlock { Text = "", FontFamily = Ui.Icons, FontSize = 17, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
-        var netGrid = new Grid(); netGrid.Children.Add(wifi.View); netGrid.Children.Add(ethernet);
+        // ── status pill (right) ──
+        ethernet = new TextBlock { Text = "\uE839", FontFamily = Ui.Icons, FontSize = 13, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
+        var netGrid = new Grid();
+        netGrid.Children.Add(new Viewbox { Child = wifi.View, Height = 13 });
+        netGrid.Children.Add(ethernet);
         wifiChip = Chip(netGrid);
         Hover(wifiChip, () => netLabel);
-        wifiChip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-availablenetworks:"); Retract(); };
+        wifiChip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-availablenetworks:"); };
         wifiChip.MouseRightButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-settings:network"); };
 
-        btGlyph = new TextBlock { Text = "", FontFamily = Ui.Icons, FontSize = 16, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        btChip = Chip(btGlyph);
+        btGlyph = new TextBlock { Text = "\uE702", FontFamily = Ui.Icons, FontSize = 12.5, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        btChip = Chip(btGlyph, state: true);
         Hover(btChip, () => btLabel);
+        btChip.MouseEnter += (_, _) => RefreshBtDevices();
         btChip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OpenBluetoothFlyout(); };
         btChip.MouseRightButtonUp += (_, e) => { e.Handled = true; ToggleBluetooth(); };
 
         batText = Ui.Text("", 12, Brushes.White, FontWeights.SemiBold);
-        batText.Margin = new Thickness(5, 0, 2, 0);
+        batText.Margin = new Thickness(5, 0, 0, 0);
         var batRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        batRow.Children.Add(battery.View); batRow.Children.Add(batText);
-        batChip = Chip(batRow, round: false);
+        batRow.Children.Add(new Viewbox { Child = battery.View, Height = 15 }); batRow.Children.Add(batText);
+        batChip = Chip(batRow, wide: true);
         Hover(batChip, () => batLabel);
         batChip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OpenUri("ms-settings:batterysaver"); };
 
         var statusRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         statusRow.Children.Add(wifiChip); statusRow.Children.Add(btChip); statusRow.Children.Add(batChip);
-        statusPod = Pod(statusRow, 56);
-        statusPod.RenderTransform = rightSlide;
+        statusPill = Pill(statusRow);
+        statusPill.HorizontalAlignment = HorizontalAlignment.Right;
+        statusPill.Margin = new Thickness(0, 0, 8, 0);
 
-        island.Children.Add(trayPod); island.Children.Add(clockPod); island.Children.Add(statusPod);
-        island.RenderTransform = drop;
-        island.Opacity = 0;
-        var root = new Grid { Background = Brushes.Transparent };
-        root.Children.Add(island);
+        // ── the tide line: fills across the bottom edge as the day passes ──
+        dayLine = new Border
+        {
+            Height = 1.5, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left,
+            Background = new LinearGradientBrush(Ui.C(0x0064D2FF), Ui.C(0xCC64D2FF), 0) { GradientStops = { new GradientStop(Ui.C(0x0064D2FF), 0), new GradientStop(Ui.C(0x9964D2FF), 0.6), new GradientStop(Ui.C(0xE6BF5AF2), 1) } }
+        };
+
+        var root = new Grid();
+        root.Children.Add(new Border { BorderBrush = Ui.B(0x1FFFFFFF), BorderThickness = new Thickness(0, 0, 0, 1) });
+        root.Children.Add(trayPill); root.Children.Add(clockPill); root.Children.Add(statusPill);
+        root.Children.Add(dayLine);
+        root.SizeChanged += (_, _) => UpdateDayLine();
         Content = root;
 
         SourceInitialized += OnSourceInitialized;
-        poll.Tick += (_, _) => Poll();
-        tick.Tick += (_, _) => RefreshClock();
+        tick.Tick += (_, _) => OnTick();
         TrayHost.Changed += OnTrayChanged;
         NetworkInformation.NetworkStatusChanged += OnNetworkChanged;
         BtChanged += OnBtChanged;
     }
 
-    /// <summary>Creates the (hidden) window and starts watching the top edge.</summary>
+    /// <summary>Creates the window, reserves the strip and starts the clock.</summary>
     public void Init()
     {
-        new WindowInteropHelper(this).EnsureHandle();
-        poll.Start();
+        Show();
         if (!btLookupStarted) { btLookupStarted = true; FindBluetooth(); }
     }
 
@@ -145,128 +147,94 @@ internal class TopBar : Window
         hwnd = new WindowInteropHelper(this).Handle;
         long ex = (long)GetWindowLongPtr(hwnd, GWL_EXSTYLE);
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, (IntPtr)((ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW));
-        HwndSource.FromHwnd(hwnd).AddHook((IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled) =>
-        {
-            if (msg == 0x0021) { handled = true; return (IntPtr)3; } // WM_MOUSEACTIVATE → never steal focus
-            return IntPtr.Zero;
-        });
-        // adopt this monitor's DPI before the first show
-        SetWindowPos(hwnd, IntPtr.Zero, mon.Bounds.Left + 10, mon.Bounds.Top - 4000, 100, 100, SWP_NOZORDER | SWP_NOACTIVATE);
+        HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+        EnableAcrylic(hwnd, 0x8C1A1716); // AABBGGRR: graphite, a touch darker than the dock
+        // adopt this monitor's DPI before sizing
+        SetWindowPos(hwnd, IntPtr.Zero, mon.Bounds.Left + 10, mon.Bounds.Top + 10, 100, 30, SWP_NOZORDER | SWP_NOACTIVATE);
         dpi = mon.Dpi;
+
+        appBarMsg = RegisterWindowMessageW("HarborTopBarMessage");
+        var abd = NewAbd(); abd.uCallbackMessage = appBarMsg;
+        TrayHost.AppBarMessage(ABM_NEW, ref abd);
+        appBarRegistered = true;
+        SetAppBarPos();
+
+        RebuildTray();
+        RefreshAll();
+        tick.Start();
     }
 
     public void Cleanup()
     {
-        poll.Stop(); tick.Stop();
+        tick.Stop();
         TrayHost.Changed -= OnTrayChanged;
         NetworkInformation.NetworkStatusChanged -= OnNetworkChanged;
         BtChanged -= OnBtChanged;
+        if (appBarRegistered) { var abd = NewAbd(); TrayHost.AppBarMessage(ABM_REMOVE, ref abd); appBarRegistered = false; }
     }
 
-    // ───────────────────────────── trigger ─────────────────────────────
+    // ───────────────────────────── appbar ─────────────────────────────
 
-    void Poll()
+    APPBARDATA NewAbd() => new() { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = hwnd };
+
+    /// <summary>Reserves the strip at the top of this monitor; Windows shrinks maximized windows to fit below it.</summary>
+    void SetAppBarPos()
     {
-        if (hwnd == IntPtr.Zero || !GetCursorPos(out var p)) return;
+        if (hwnd == IntPtr.Zero || !appBarRegistered) return;
+        mon = GetMonitors().FirstOrDefault(x => x.Device == monitorDevice) ?? mon;
+        dpi = mon.Dpi;
         var b = mon.Bounds;
-        int wPx = (int)Math.Round(winW * dpi);
-        int left = b.Left + (b.Right - b.Left - wPx) / 2;
+        int h = (int)Math.Round(BarH * dpi);
+        var abd = NewAbd();
+        abd.uEdge = 1; // ABE_TOP
+        abd.rc = new RECT { Left = b.Left, Top = b.Top, Right = b.Right, Bottom = b.Top + h };
+        TrayHost.AppBarMessage(ABM_QUERYPOS, ref abd);
+        abd.rc.Bottom = abd.rc.Top + h;
+        TrayHost.AppBarMessage(ABM_SETPOS, ref abd);
+        SetWindowPos(hwnd, IntPtr.Zero, abd.rc.Left, abd.rc.Top, abd.rc.Right - abd.rc.Left, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 
-        if (!open || closing)
+    IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled)
+    {
+        if (msg == appBarMsg && appBarMsg != 0)
         {
-            bool atEdge = p.Y >= b.Top && p.Y <= b.Top + 1 && p.X >= left && p.X < left + wPx;
-            bool buttonDown = (GetAsyncKeyState(0x01) & 0x8000) != 0 || (GetAsyncKeyState(0x02) & 0x8000) != 0;
-            if (atEdge && !buttonDown && !FullscreenAppHere()) { if (++dwell >= DwellTicks) { dwell = 0; Open(); } }
-            else dwell = 0;
+            if ((uint)w == ABN_POSCHANGED) Dispatcher.BeginInvoke(SetAppBarPos);
+            else if ((uint)w == ABN_FULLSCREENAPP) { bool fs = l != IntPtr.Zero; Dispatcher.BeginInvoke(() => SetFullscreen(fs)); }
         }
-        else
-        {
-            GetWindowRect(hwnd, out var r);
-            int pad = (int)(22 * dpi);
-            bool near = p.X >= r.Left - pad && p.X <= r.Right + pad && p.Y >= r.Top - 2 && p.Y <= r.Bottom + pad;
-            if (near) away = 0;
-            else if (++away >= AwayTicks) Retract();
-        }
+        else if (msg == 0x007E || msg == 0x02E0) // WM_DISPLAYCHANGE, WM_DPICHANGED
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, SetAppBarPos);
+        else if (msg == 0x0021) { handled = true; return (IntPtr)3; } // WM_MOUSEACTIVATE → never steal focus
+        return IntPtr.Zero;
+    }
+
+    void SetFullscreen(bool fs)
+    {
+        if (fs && !FullscreenAppHere()) return; // a fullscreen app on another monitor
+        if (fs == fullscreen) return;
+        fullscreen = fs;
+        if (fs) { Hide(); tick.Stop(); }
+        else { Show(); tick.Start(); RefreshAll(); SetAppBarPos(); }
     }
 
     bool FullscreenAppHere()
     {
         var fg = GetForegroundWindow();
         if (fg == IntPtr.Zero) return false;
-        string cls = GetClassName(fg);
-        if (cls is "Progman" or "WorkerW") return false;
+        if (GetClassName(fg) is "Progman" or "WorkerW") return false;
         GetWindowRect(fg, out var r);
         var b = mon.Bounds;
         return r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
     }
 
-    // ───────────────────────────── open / close ─────────────────────────────
-
-    void Open()
-    {
-        if (open && !closing) return;
-        bool wasHidden = !IsVisible;
-        open = true; closing = false; away = 0;
-        RefreshAll();
-        if (trayDirty) RebuildTray();
-        Place();
-        if (wasHidden)
-        {
-            drop.Y = DropFrom; leftSlide.X = 70; rightSlide.X = -70; centerScale.ScaleX = centerScale.ScaleY = 0.8; island.Opacity = 0;
-            Show();
-        }
-        var outEase = new CubicEase { EasingMode = EasingMode.EaseOut };
-        Animate(drop, TranslateTransform.YProperty, 0, 360, new BackEase { Amplitude = 0.32, EasingMode = EasingMode.EaseOut });
-        Animate(leftSlide, TranslateTransform.XProperty, 0, 440, outEase);
-        Animate(rightSlide, TranslateTransform.XProperty, 0, 440, outEase);
-        Animate(centerScale, ScaleTransform.ScaleXProperty, 1, 380, outEase);
-        Animate(centerScale, ScaleTransform.ScaleYProperty, 1, 380, outEase);
-        Animate(island, OpacityProperty, 1, 200, null);
-        tick.Start();
-    }
-
-    void Retract()
-    {
-        if (!open || closing) return;
-        closing = true;
-        var inEase = new CubicEase { EasingMode = EasingMode.EaseIn };
-        var last = Animate(drop, TranslateTransform.YProperty, DropFrom, 230, inEase);
-        Animate(leftSlide, TranslateTransform.XProperty, 50, 230, inEase);
-        Animate(rightSlide, TranslateTransform.XProperty, -50, 230, inEase);
-        Animate(centerScale, ScaleTransform.ScaleXProperty, 0.88, 230, inEase);
-        Animate(centerScale, ScaleTransform.ScaleYProperty, 0.88, 230, inEase);
-        Animate(island, OpacityProperty, 0, 200, null);
-        last.Completed += (_, _) =>
-        {
-            if (!closing) return; // re-opened mid-way
-            closing = false; open = false;
-            tick.Stop();
-            Hide();
-            ResetReadout();
-        };
-    }
-
-    static DoubleAnimation Animate(IAnimatable target, DependencyProperty prop, double to, int ms, IEasingFunction ease)
-    {
-        var a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease };
-        target.BeginAnimation(prop, a);
-        return a;
-    }
-
-    /// <summary>Sizes the window to the island and centres it on the top edge of this monitor.</summary>
-    void Place()
-    {
-        mon = GetMonitors().FirstOrDefault(x => x.Device == monitorDevice) ?? mon;
-        dpi = mon.Dpi;
-        island.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        var b = mon.Bounds;
-        double maxW = (b.Right - b.Left) / dpi;
-        winW = Math.Min(maxW, Math.Max(520, island.DesiredSize.Width + 60));
-        int wPx = (int)Math.Ceiling(winW * dpi), hPx = (int)Math.Ceiling(WinH * dpi);
-        SetWindowPos(hwnd, IntPtr.Zero, b.Left + (b.Right - b.Left - wPx) / 2, b.Top, wPx, hPx, SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-
     // ───────────────────────────── content ─────────────────────────────
+
+    void OnTick()
+    {
+        tickCount++;
+        RefreshClock();
+        if (tickCount % 30 == 0) RefreshBattery();
+        if (tickCount % 20 == 0 && wifi.View.Visibility == Visibility.Visible) RefreshNetwork(); // signal strength drifts
+    }
 
     void RefreshAll() { RefreshClock(); RefreshBattery(); RefreshNetwork(); RefreshBluetooth(); RefreshBtDevices(); }
 
@@ -274,13 +242,16 @@ internal class TopBar : Window
     {
         var now = DateTime.Now;
         bool h24 = CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern.Contains('H');
-        string t = now.ToString(h24 ? "HH:mm" : "h:mm");
-        if (time.Text != t) time.Text = t;
-        ampm.Text = h24 ? "" : now.ToString("tt");
-        ampm.Visibility = h24 ? Visibility.Collapsed : Visibility.Visible;
-        if (!hovering) ResetReadout();
-        dayFill.Width = 150 * now.TimeOfDay.TotalMinutes / 1440.0;
-        if (now.Second % 5 == 0) RefreshBattery();
+        string t = now.ToString(h24 ? "HH:mm" : "h:mm tt");
+        if (time.Text != t) { time.Text = t; UpdateDayLine(); }
+        string d = now.ToString("ddd, MMM d");
+        if (date.Text != d) date.Text = d;
+    }
+
+    void UpdateDayLine()
+    {
+        if (Content is FrameworkElement root && root.ActualWidth > 0)
+            dayLine.Width = root.ActualWidth * DateTime.Now.TimeOfDay.TotalMinutes / 1440.0;
     }
 
     void RefreshBattery()
@@ -321,10 +292,10 @@ internal class TopBar : Window
                 ShowNet(wifiMode: false);
                 netLabel = prof.IsWwanConnectionProfile ? "Cellular  ·  " + prof.ProfileName : "Ethernet  ·  " + prof.ProfileName;
             }
-            var level = prof?.GetNetworkConnectivityLevel();
-            if (prof != null && level != NetworkConnectivityLevel.InternetAccess) netLabel += "  ·  no internet";
+            if (prof != null && prof.GetNetworkConnectivityLevel() != NetworkConnectivityLevel.InternetAccess) netLabel += "  ·  no internet";
         }
         catch (Exception ex) { Log.Write("topbar net: " + ex.Message); netLabel = "Network"; }
+        if (hoverSource == wifiChip) ShowReadout(netLabel);
     }
 
     void ShowNet(bool wifiMode)
@@ -333,7 +304,7 @@ internal class TopBar : Window
         ethernet.Visibility = wifiMode ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    void OnNetworkChanged(object sender) => Dispatcher.BeginInvoke(() => { if (open) RefreshNetwork(); });
+    void OnNetworkChanged(object sender) => Dispatcher.BeginInvoke(RefreshNetwork);
 
     // Bluetooth: one radio lookup shared by every monitor's bar
     static async void FindBluetooth()
@@ -355,22 +326,22 @@ internal class TopBar : Window
     void RefreshBluetooth()
     {
         bool on = bt?.State == RadioState.On;
-        btChip.Background = on ? Ui.B(0xFF0A84FF) : Ui.B(0x14FFFFFF);
+        btChip.Background = on ? Ui.B(0xFF0A84FF) : Brushes.Transparent;
         btGlyph.Foreground = on ? Brushes.White : Ui.B(0x80FFFFFF);
         if (bt == null) btLabel = "Bluetooth  ·  not available";
         else if (!on) btLabel = "Bluetooth off  ·  right-click to turn on";
         else if (btConnected.Count == 0) btLabel = "Bluetooth on  ·  no devices connected";
         else btLabel = "Connected: " + string.Join(", ", btConnected);
-        if (hovering && hoverSource == btChip) readout.Text = btLabel;
+        if (hoverSource == btChip) ShowReadout(btLabel);
     }
 
     /// <summary>Names of connected Bluetooth devices (classic + Low Energy).</summary>
     async void RefreshBtDevices()
     {
         if (bt?.State != RadioState.On) { btConnected = new(); RefreshBluetooth(); return; }
+        var names = new List<string>();
         try
         {
-            var names = new List<string>();
             foreach (var sel in new[]
             {
                 BluetoothDevice.GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus.Connected),
@@ -378,18 +349,17 @@ internal class TopBar : Window
             })
                 foreach (var d in await DeviceInformation.FindAllAsync(sel))
                     if (!string.IsNullOrWhiteSpace(d.Name) && !names.Contains(d.Name)) names.Add(d.Name);
-            btConnected = names;
         }
-        catch (Exception ex) { Log.Write("topbar bt devices: " + ex.Message); }
-        RefreshBluetooth();
+        catch (Exception ex) { Log.Write("topbar bt devices: " + ex.Message); return; }
+        // the await may resume on a pool thread (e.g. before the UI loop starts), so hop back to the UI thread
+        _ = Dispatcher.BeginInvoke(() => { btConnected = names; RefreshBluetooth(); });
     }
 
     /// <summary>Opens Windows' own Bluetooth device list (Quick Settings › Bluetooth), like the Wi-Fi chip does.</summary>
-    void OpenBluetoothFlyout()
+    static void OpenBluetoothFlyout()
     {
         try { Process.Start(new ProcessStartInfo("ms-actioncenter:controlcenter/bluetooth") { UseShellExecute = true }); }
         catch { OpenUri("ms-settings:bluetooth"); }
-        Retract();
     }
 
     async void ToggleBluetooth()
@@ -401,30 +371,25 @@ internal class TopBar : Window
             await bt.SetStateAsync(bt.State == RadioState.On ? RadioState.Off : RadioState.On);
         }
         catch (Exception ex) { Log.Write("topbar bt toggle: " + ex.Message); OpenUri("ms-settings:bluetooth"); }
-        RefreshBluetooth();
+        _ = Dispatcher.BeginInvoke(RefreshBluetooth);
     }
 
-    void OnTrayChanged()
-    {
-        trayDirty = true;
-        if (open && !closing) { RebuildTray(); Place(); }
-    }
+    void OnTrayChanged() => RebuildTray();
 
     void RebuildTray()
     {
-        trayDirty = false;
         trayRow.Children.Clear();
         var icons = TrayHost.Icons.Where(i => !i.Hidden && i.Icon != null).ToList();
         if (icons.Count == 0)
         {
-            var empty = Ui.Text(TrayHost.Running ? "No tray icons" : "Tray off", 11, Ui.B(0x80FFFFFF), FontWeights.Normal);
+            var empty = Ui.Text(TrayHost.Running ? "No tray icons" : "Tray off", 11.5, Ui.B(0x80FFFFFF), FontWeights.Normal);
             empty.Margin = new Thickness(8, 0, 8, 0);
             trayRow.Children.Add(empty);
             return;
         }
         foreach (var ic in icons)
         {
-            var img = new Image { Source = ic.Icon, Width = 18, Height = 18, Stretch = Stretch.Uniform };
+            var img = new Image { Source = ic.Icon, Width = 16, Height = 16, Stretch = Stretch.Uniform };
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
             var cell = Chip(img);
             Hover(cell, () => string.IsNullOrWhiteSpace(ic.Tip) ? "Tray icon" : ic.Tip.Replace("\r", "").Replace("\n", "  ·  "));
@@ -438,47 +403,48 @@ internal class TopBar : Window
 
     // ───────────────────────────── read-out ─────────────────────────────
 
-    bool hovering;
     FrameworkElement hoverSource;
 
     void Hover(FrameworkElement el, Func<string> text)
     {
         el.MouseEnter += (_, _) =>
         {
-            hovering = true; hoverSource = el;
-            readout.Text = text(); readout.Foreground = Brushes.White;
-            if (el != clockPod && el is Border b && b.Tag == null) b.Background = Ui.B(0x26FFFFFF);
+            hoverSource = el;
+            if (el != clockPill) ShowReadout(text());
+            if (el is Border b && b.Tag == null && el != clockPill) b.Background = Ui.B(0x26FFFFFF);
         };
         el.MouseLeave += (_, _) =>
         {
-            if (hoverSource == el) { hovering = false; hoverSource = null; ResetReadout(); }
-            if (el != clockPod && el is Border b && b.Tag == null) b.Background = Brushes.Transparent;
+            if (hoverSource == el) { hoverSource = null; ShowReadout(null); }
+            if (el is Border b && b.Tag == null && el != clockPill) b.Background = Brushes.Transparent;
         };
     }
 
-    void ResetReadout()
+    /// <summary>Cross-fades the clock pill between the time/date and a hovered item's details (null = back to time).</summary>
+    void ShowReadout(string text)
     {
-        readout.Text = DateTime.Now.ToString("dddd, MMMM d");
-        readout.Foreground = Ui.B(0xC8FFFFFF);
+        bool show = !string.IsNullOrEmpty(text);
+        if (show) readout.Text = text;
+        var d = TimeSpan.FromMilliseconds(140);
+        readout.BeginAnimation(OpacityProperty, new DoubleAnimation(show ? 1 : 0, d));
+        clockRow.BeginAnimation(OpacityProperty, new DoubleAnimation(show ? 0 : 1, d));
     }
 
     // ───────────────────────────── building blocks ─────────────────────────────
 
-    static Border Pod(UIElement child, double minW) => new()
+    static Border Pill(UIElement child) => new()
     {
-        Height = PodH, MinWidth = minW, CornerRadius = new CornerRadius(PodH / 2), Padding = new Thickness(12, 0, 12, 0),
-        Margin = new Thickness(5, 0, 5, 0), Child = child,
-        Background = Ui.Grad(0xF22B2B2E, 0xF2151517),
-        BorderBrush = Ui.Grad(0x55FFFFFF, 0x12FFFFFF), BorderThickness = new Thickness(1)
+        Height = PillH, CornerRadius = new CornerRadius(PillH / 2), Padding = new Thickness(4, 0, 4, 0),
+        VerticalAlignment = VerticalAlignment.Center, Child = child,
+        Background = Ui.B(0x1AFFFFFF), BorderBrush = Ui.B(0x1FFFFFFF), BorderThickness = new Thickness(0.8)
     };
 
     /// <summary>A round hover target. Chips with a coloured state (Bluetooth) are tagged so hover doesn't repaint them.</summary>
-    Border Chip(UIElement child, bool round = true) => new()
+    static Border Chip(UIElement child, bool wide = false, bool state = false) => new()
     {
-        Height = 38, MinWidth = 38, CornerRadius = new CornerRadius(19), Margin = new Thickness(1.5, 0, 1.5, 0),
-        Padding = round ? new Thickness(0) : new Thickness(6, 0, 8, 0),
-        Background = Brushes.Transparent, Child = child, Cursor = Cursors.Hand,
-        Tag = child == btGlyph ? "state" : null
+        Height = 20, MinWidth = 26, CornerRadius = new CornerRadius(10), Margin = new Thickness(1, 0, 1, 0),
+        Padding = wide ? new Thickness(5, 0, 7, 0) : new Thickness(0),
+        Background = Brushes.Transparent, Child = child, Cursor = Cursors.Hand, Tag = state ? "state" : null
     };
 
     static void OpenUri(string uri)
@@ -490,7 +456,7 @@ internal class TopBar : Window
     /// <summary>Wi-Fi strength drawn as three arcs over a dot (vector, so it stays sharp at any DPI).</summary>
     class WifiGlyph
     {
-        public readonly Canvas View = new() { Width = 24, Height = 19, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        public readonly Canvas View = new() { Width = 24, Height = 19 };
         readonly Path[] arcs = new Path[3];
         readonly Ellipse dot = new() { Width = 4, Height = 4 };
         static readonly Brush On = Brushes.White, Off = Ui.B(0x40FFFFFF);
@@ -504,7 +470,7 @@ internal class TopBar : Window
                 var fig = new PathFigure { StartPoint = new Point(cx - s, cy - c) };
                 fig.Segments.Add(new ArcSegment(new Point(cx + s, cy - c), new Size(r, r), 0, false, SweepDirection.Clockwise, true));
                 var geo = new PathGeometry(); geo.Figures.Add(fig); geo.Freeze();
-                arcs[i] = new Path { Data = geo, StrokeThickness = 2.2, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
+                arcs[i] = new Path { Data = geo, StrokeThickness = 2.4, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
                 View.Children.Add(arcs[i]);
             }
             Canvas.SetLeft(dot, cx - 2); Canvas.SetTop(dot, cy - 2);
@@ -521,9 +487,9 @@ internal class TopBar : Window
     /// <summary>Battery as a ring: white normally, red at 20% or less, green with a bolt while charging.</summary>
     class BatteryRing
     {
-        public readonly Grid View = new() { Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center };
+        public readonly Grid View = new() { Width = 24, Height = 24 };
         readonly Path arc = new() { StrokeThickness = 3, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
-        readonly TextBlock bolt = new() { Text = "", FontFamily = Ui.Icons, FontSize = 10, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        readonly TextBlock bolt = new() { Text = "\uE945", FontFamily = Ui.Icons, FontSize = 11, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         int lastPct = -1; bool lastCharging;
         public BatteryRing()
         {
