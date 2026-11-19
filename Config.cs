@@ -19,6 +19,9 @@ public class Config
     public bool ShowWidgets { get; set; } = true;
     public bool ClockSeconds { get; set; } = false;
     public bool HideWindowsTaskbar { get; set; } = true;
+    public bool ShowTopBar { get; set; } = true;
+    /// <summary>"Digital", "Analog" or "Both".</summary>
+    public string ClockStyle { get; set; } = "Digital";
     public int OriginalTaskbarState { get; set; } = -1;
     public List<PinConfig> Pins { get; set; } = new();
 

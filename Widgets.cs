@@ -118,6 +118,44 @@ internal class ClockTile
     public static string Label() => DateTime.Now.ToString("h:mm tt  ·  dddd, MMM d");
 }
 
+/// <summary>Always-visible digital time for the dock: big hours:minutes, AM/PM (or seconds) underneath.</summary>
+internal class DigitalClockTile
+{
+    public readonly Viewbox View;
+    public const double Aspect = 104 / Ui.H;
+    readonly TextBlock hm, sub;
+    readonly Border pulse;
+    public bool ShowSeconds { get; set; }
+
+    public DigitalClockTile()
+    {
+        hm = Ui.Text("", 30, Brushes.White, FontWeights.Light);
+        hm.Margin = new Thickness(0, -3, 0, 0);
+        sub = Ui.Text("", 9.5, Ui.B(0xB3FFFFFF), FontWeights.SemiBold);
+        sub.Margin = new Thickness(0, -4, 0, 0);
+        // thin accent line that fills as the minute passes: the only moving part, redrawn once per second
+        pulse = new Border { Height = 2, CornerRadius = new CornerRadius(1), HorizontalAlignment = HorizontalAlignment.Left, Background = new LinearGradientBrush(Ui.C(0xFF64D2FF), Ui.C(0xFFBF5AF2), 0) };
+        var track = new Grid { Width = 56, Height = 2, Margin = new Thickness(0, 3, 0, 0) };
+        track.Children.Add(new Border { CornerRadius = new CornerRadius(1), Background = Ui.B(0x26FFFFFF) });
+        track.Children.Add(pulse);
+        var s = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+        s.Children.Add(hm); s.Children.Add(sub); s.Children.Add(track);
+        View = Ui.Wrap(Ui.Tile(104, Ui.Grad(0xFF3A3A3C, 0xFF1C1C1E), s));
+        Update();
+    }
+
+    public void Update()
+    {
+        var n = DateTime.Now;
+        bool h24 = System.Globalization.CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern.Contains('H');
+        string t = n.ToString(h24 ? "HH:mm" : "h:mm");
+        if (hm.Text != t) hm.Text = t;
+        string st = ShowSeconds ? n.ToString(h24 ? "ss" : "ss  ·  tt") : h24 ? n.ToString("ddd").ToUpperInvariant() : n.ToString("tt");
+        if (sub.Text != st) sub.Text = st;
+        pulse.Width = 56 * n.Second / 59.0;
+    }
+}
+
 internal class LaunchpadTile
 {
     public readonly Viewbox View;

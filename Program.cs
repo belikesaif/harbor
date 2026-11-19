@@ -44,6 +44,7 @@ public static class Program
 {
     static Config cfg;
     static readonly List<DockWindow> docks = new();
+    static readonly List<TopBar> bars = new();
     static bool cleaned;
     // Windows sends a burst of display-change notifications while a monitor is (un)plugged; wait for it to settle.
     static readonly System.Windows.Threading.DispatcherTimer displayDebounce = new() { Interval = TimeSpan.FromMilliseconds(800) };
@@ -75,6 +76,19 @@ public static class Program
             dock.Show();
             docks.Add(dock);
         }
+
+        foreach (var b in bars.Where(b => !cfg.ShowTopBar || !monitors.Any(m => m.Device == b.MonitorDevice)).ToList())
+        {
+            bars.Remove(b);
+            try { b.Cleanup(); b.Close(); } catch (Exception ex) { Log.Write("top bar close: " + ex); }
+        }
+        if (cfg.ShowTopBar)
+            foreach (var m in monitors.Where(m => !bars.Any(b => b.MonitorDevice == m.Device)))
+            {
+                var bar = new TopBar(m);
+                bar.Init();
+                bars.Add(bar);
+            }
 
         TaskbarControl.EnforceHidden(); // Explorer may recreate secondary taskbars on a display change
     }
@@ -108,13 +122,22 @@ public static class Program
         cfg = Config.Load();
         TaskbarControl.Apply(cfg);
 
-        // one dock per monitor, kept in sync as monitors are connected / disconnected
+        if (cfg.ShowTopBar) TrayHost.Start();
+
+        // one dock (and top bar) per monitor, kept in sync as monitors are connected / disconnected
         SyncDocks();
         displayDebounce.Tick += (_, _) => { displayDebounce.Stop(); SyncDocks(); };
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         app.Run();
         Cleanup();
+    }
+
+    /// <summary>Turns the top bar (and the tray host behind it) on or off after the setting changed.</summary>
+    public static void ApplyTopBar()
+    {
+        if (cfg.ShowTopBar) TrayHost.Start(); else TrayHost.Stop();
+        SyncDocks();
     }
 
     public static void Quit()
@@ -129,6 +152,8 @@ public static class Program
         cleaned = true;
         try { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged; } catch { }
         foreach (var d in docks) { try { d.Dispatcher.Invoke(d.Cleanup); } catch { } }
+        foreach (var b in bars) { try { b.Dispatcher.Invoke(b.Cleanup); } catch { } }
+        try { Application.Current?.Dispatcher.Invoke(TrayHost.Stop); } catch { }
         try { TaskbarControl.Restore(cfg); } catch { }
     }
 }

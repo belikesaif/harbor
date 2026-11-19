@@ -75,8 +75,8 @@ internal class DockWindow : Window
     readonly Dictionary<DockEntry, DockCell> appCells = new();
     readonly List<DockCell> cells = new();
 
-    DockCell launchCell, sep1, sep2, sep3, calCell, clockCell, sysCell, mediaCell, ccCell, dlCell, trashCell;
-    CalendarTile cal; ClockTile clock; SystemWidget sys; MediaWidget media;
+    DockCell launchCell, sep1, sep2, sep3, calCell, clockCell, digiCell, sysCell, mediaCell, ccCell, dlCell, trashCell;
+    CalendarTile cal; ClockTile clock; DigitalClockTile digi; SystemWidget sys; MediaWidget media;
     long lastBinCount = -1;
 
     readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -207,6 +207,8 @@ internal class DockWindow : Window
         calCell = new DockCell("widget", cal.View) { Label = () => DateTime.Now.ToString("dddd, MMMM d, yyyy"), Click = () => PressKeys(VK_LWIN, 0x4E /*N*/) };
         clock = new ClockTile { ShowSeconds = cfg.ClockSeconds };
         clockCell = new DockCell("widget", clock.View) { Label = ClockTile.Label, Click = () => Shell.Launch("ms-clock:") };
+        digi = new DigitalClockTile { ShowSeconds = cfg.ClockSeconds };
+        digiCell = new DockCell("widget", digi.View) { Aspect = DigitalClockTile.Aspect, Label = ClockTile.Label, Click = () => Shell.Launch("ms-clock:") };
         sys = new SystemWidget();
         sysCell = new DockCell("widget", sys.View) { Aspect = sys.Aspect, Label = sys.Label, Click = () => Shell.Launch("taskmgr.exe") };
         media = new MediaWidget();
@@ -221,7 +223,7 @@ internal class DockWindow : Window
         trashCell = new DockCell("sys", IconImage(bin)) { Label = BinLabel, Click = () => Shell.Launch("shell:RecycleBinFolder"), RightClick = c => ShowMenu(BuildBinMenu(), c) };
 
         sep1 = Separator(); sep2 = Separator(); sep3 = Separator();
-        foreach (var c in new[] { launchCell, calCell, clockCell, sysCell, mediaCell, ccCell, dlCell, trashCell }) Wire(c);
+        foreach (var c in new[] { launchCell, calCell, clockCell, digiCell, sysCell, mediaCell, ccCell, dlCell, trashCell }) Wire(c);
         UpdateBin();
     }
 
@@ -350,7 +352,10 @@ internal class DockWindow : Window
         want.Add(sep2);
         if (cfg.ShowWidgets)
         {
-            want.Add(calCell); want.Add(clockCell); want.Add(sysCell);
+            want.Add(calCell);
+            if (cfg.ClockStyle != "Analog") want.Add(digiCell);
+            if (cfg.ClockStyle is "Analog" or "Both") want.Add(clockCell);
+            want.Add(sysCell);
             if (media.HasSession) want.Add(mediaCell);
         }
         want.Add(ccCell);
@@ -664,7 +669,7 @@ internal class DockWindow : Window
         if (ev == 0x8002 && TaskbarControl.Hidden)
         {
             string cls = Native.GetClassName(h);
-            if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
+            if ((cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") && !TrayHost.IsOwnWindow(h))
             {
                 Dispatcher.BeginInvoke(DispatcherPriority.Background, TaskbarControl.EnforceHidden);
                 return;
@@ -680,7 +685,8 @@ internal class DockWindow : Window
         tickCount++;
         TaskbarControl.EnforceHidden(); // safety net, costs a few microseconds
         if (tickCount % 10 == 0 && Environment.GetEnvironmentVariable("HARBOR_DIAG") == "1") { Log.Write($"diag refresh={DiagRefresh} frames={DiagFrames} events={DiagEvents} rebuild={DiagRebuild}"); DiagRefresh = DiagFrames = DiagEvents = DiagRebuild = 0; }
-        clock.Update();
+        if (cfg.ClockStyle is "Analog" or "Both") clock.Update();
+        if (cfg.ClockStyle != "Analog") digi.Update();
         if (tickCount % 30 == 0) cal.Update();
         if (tickCount % 3 == 0) sys.Update();
         if (tickCount % 5 == 0) UpdateBin();
@@ -828,7 +834,12 @@ internal class DockWindow : Window
             mag.Items.Add(Item(n, () => { cfg.Magnification = v; cfg.Save(); Relayout(); }, true, Math.Abs(cfg.Magnification - v) < 0.01));
         m.Items.Add(mag);
         m.Items.Add(Item("Show Widgets", () => { cfg.ShowWidgets = !cfg.ShowWidgets; cfg.Save(); RebuildCells(); }, true, cfg.ShowWidgets));
-        m.Items.Add(Item("Clock Second Hand", () => { cfg.ClockSeconds = !cfg.ClockSeconds; clock.ShowSeconds = cfg.ClockSeconds; cfg.Save(); }, true, cfg.ClockSeconds));
+        var style = new MenuItem { Header = "Clock Style" };
+        foreach (var n in new[] { "Digital", "Analog", "Both" })
+            style.Items.Add(Item(n, () => { cfg.ClockStyle = n; cfg.Save(); RebuildCells(); }, true, cfg.ClockStyle == n));
+        m.Items.Add(style);
+        m.Items.Add(Item("Clock Seconds", () => { cfg.ClockSeconds = !cfg.ClockSeconds; clock.ShowSeconds = digi.ShowSeconds = cfg.ClockSeconds; digi.Update(); cfg.Save(); }, true, cfg.ClockSeconds));
+        m.Items.Add(Item("Top Bar (hover top edge)", () => { cfg.ShowTopBar = !cfg.ShowTopBar; cfg.Save(); Program.ApplyTopBar(); }, true, cfg.ShowTopBar));
         m.Items.Add(Item("Hide Windows Taskbar", () => { cfg.HideWindowsTaskbar = !cfg.HideWindowsTaskbar; TaskbarControl.Apply(cfg); cfg.Save(); }, true, cfg.HideWindowsTaskbar));
         m.Items.Add(Item("Start with Windows", () => Startup.Toggle(), true, Startup.Enabled));
         m.Items.Add(new Separator());
@@ -870,7 +881,8 @@ internal static class TaskbarControl
 
     static void SetState(int state)
     {
-        var abd = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = FindWindowW("Shell_TrayWnd", null), lParam = (IntPtr)state };
+        var main = TrayWindows().FirstOrDefault(h => Native.GetClassName(h) == "Shell_TrayWnd"); // Explorer's, never Harbor's tray host
+        var abd = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = main, lParam = (IntPtr)state };
         SHAppBarMessage(ABM_SETSTATE, ref abd);
     }
 
@@ -883,7 +895,7 @@ internal static class TaskbarControl
         EnumWindows((h, _) =>
         {
             string cls = Native.GetClassName(h);
-            if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") list.Add(h);
+            if ((cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") && !TrayHost.IsOwnWindow(h)) list.Add(h);
             return true;
         }, IntPtr.Zero);
         return list;
