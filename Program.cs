@@ -5,41 +5,6 @@ using static Harbor.Native;
 
 namespace Harbor;
 
-/// <summary>The frosted-glass layer behind the dock. A separate window so the blur can be clipped to a rounded shape
-/// while icons are free to magnify above it.</summary>
-public class GlassWindow : Window
-{
-    IntPtr hwnd;
-    public IntPtr Handle => hwnd;
-    int lw, lh, lr;
-
-    public GlassWindow()
-    {
-        WindowStyle = WindowStyle.None; AllowsTransparency = true; ResizeMode = ResizeMode.NoResize;
-        Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-        ShowInTaskbar = false; Topmost = true; ShowActivated = false;
-        Left = -200; Top = -200; Width = 10; Height = 10;
-        SourceInitialized += (_, _) =>
-        {
-            hwnd = new WindowInteropHelper(this).Handle;
-            long ex = (long)GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtr(hwnd, GWL_EXSTYLE, (IntPtr)((ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT) & ~WS_EX_APPWINDOW));
-            EnableAcrylic(hwnd, 0x66221E1E); // AABBGGRR: graphite tint
-        };
-    }
-
-    public void Place(int x, int y, int w, int h, int radius)
-    {
-        if (hwnd == IntPtr.Zero || w <= 0 || h <= 0) return;
-        SetWindowPos(hwnd, IntPtr.Zero, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-        if (w != lw || h != lh || radius != lr)
-        {
-            SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2), true);
-            lw = w; lh = h; lr = radius;
-        }
-    }
-}
-
 public static class Program
 {
     static Config cfg;
@@ -72,7 +37,7 @@ public static class Program
             if (docks.Count > 0) Log.Write("monitor added: " + m.Device);
             var glass = new GlassWindow();
             glass.Show();
-            var dock = new DockWindow(cfg, glass, m) { Owner = glass };
+            var dock = new DockWindow(cfg, glass, m); // the dock makes itself owned by the glass → always drawn above it
             dock.Show();
             docks.Add(dock);
         }
@@ -127,6 +92,21 @@ public static class Program
         // one dock (and top bar) per monitor, kept in sync as monitors are connected / disconnected
         SyncDocks();
         displayDebounce.Tick += (_, _) => { displayDebounce.Stop(); SyncDocks(); };
+
+        // follow "Pin to taskbar" / "Unpin from taskbar" from the Start menu (the Windows taskbar itself is hidden)
+        if (cfg.SyncTaskbarPins()) foreach (var d in docks) d.ReloadPinsFromConfig();
+        var pinWatch = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        pinWatch.Tick += (_, _) =>
+        {
+            if (cleaned) { pinWatch.Stop(); return; }
+            if (cfg.SyncTaskbarPins()) foreach (var d in docks) d.ReloadPinsFromConfig();
+        };
+        pinWatch.Start();
+
+        StartFullscreenWatch();
+
+        Hotkeys.OnPin = i => docks.FirstOrDefault()?.ActivatePin(i);
+        Hotkeys.Start();
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         app.Run();
@@ -138,6 +118,69 @@ public static class Program
     {
         if (cfg.ShowTopBar) TrayHost.Start(); else TrayHost.Stop();
         SyncDocks();
+    }
+
+    // ───── fullscreen detection ─────
+    // Windows' ABN_FULLSCREENAPP notification never arrived in testing (the dock stayed on top of a fullscreen
+    // window), so Harbor detects it itself: the foreground window covers its whole monitor and isn't just maximized.
+    static WinEventDelegate fsProc;
+    static readonly List<IntPtr> fsHooks = new();
+    static readonly System.Windows.Threading.DispatcherTimer fsTimer = new() { Interval = TimeSpan.FromSeconds(1.5) };
+    static bool fsQueued;
+
+    static void StartFullscreenWatch()
+    {
+        fsProc = (hook, ev, h, idObject, idChild, thread, time) =>
+        {
+            if (idObject != 0) return;
+            if (ev == 0x800B /* LOCATIONCHANGE */ && h != GetForegroundWindow()) return;
+            if (fsQueued) return;
+            fsQueued = true;
+            Application.Current?.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => { fsQueued = false; CheckFullscreen(); });
+        };
+        fsHooks.Add(SetWinEventHook(0x0003, 0x0003, IntPtr.Zero, fsProc, 0, 0, 2)); // foreground changed
+        fsHooks.Add(SetWinEventHook(0x800B, 0x800B, IntPtr.Zero, fsProc, 0, 0, 2)); // a window moved/resized (F11)
+        fsTimer.Tick += (_, _) => CheckFullscreen();
+        fsTimer.Start();
+    }
+
+    static void StopFullscreenWatch()
+    {
+        fsTimer.Stop();
+        foreach (var h in fsHooks) if (h != IntPtr.Zero) UnhookWinEvent(h);
+        fsHooks.Clear();
+    }
+
+    static readonly HashSet<string> shellClasses = new(StringComparer.Ordinal)
+        { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow", "ControlCenterWindow", "TopLevelWindowForOverflowXamlIsland" };
+
+    static void CheckFullscreen()
+    {
+        if (cleaned) return;
+        var fg = GetForegroundWindow();
+        RECT r = default;
+        bool candidate = fg != IntPtr.Zero && !shellClasses.Contains(GetClassName(fg)) && GetWindowRect(fg, out r);
+        if (candidate)
+        {
+            GetWindowThreadProcessId(fg, out uint pid);
+            long style = (long)GetWindowLongPtr(fg, -16 /* GWL_STYLE */);
+            const long WS_CAPTION = 0x00C00000;
+            // a maximized window can also cover the screen (with auto-hide on) but isn't fullscreen; borderless
+            // windows count even when maximized, and plenty of real fullscreen apps keep caption styles
+            // …but with auto-hide on, a maximized window covers the whole screen anyway (and many apps, e.g. Electron
+            // ones, draw their own title bar), so then only non-maximized windows count — else the dock would vanish.
+            candidate = pid != (uint)Environment.ProcessId && (!IsZoomed(fg) || ((style & WS_CAPTION) != WS_CAPTION && !cfg.AutoHide));
+        }
+        foreach (var d in docks) d.SetFullscreen(candidate && Covers(r, d.Monitor.Bounds));
+        foreach (var b in bars) b.SetFullscreen(candidate && Covers(r, b.Monitor.Bounds));
+    }
+
+    static bool Covers(RECT r, RECT b) => r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
+
+    /// <summary>Applies the auto-hide setting to the dock on every monitor.</summary>
+    public static void ApplyAutoHide()
+    {
+        foreach (var d in docks) d.OnAutoHideChanged();
     }
 
     public static void Quit()
@@ -154,6 +197,8 @@ public static class Program
         foreach (var d in docks) { try { d.Dispatcher.Invoke(d.Cleanup); } catch { } }
         foreach (var b in bars) { try { b.Dispatcher.Invoke(b.Cleanup); } catch { } }
         try { Application.Current?.Dispatcher.Invoke(TrayHost.Stop); } catch { }
+        try { Hotkeys.Stop(); } catch { }
+        try { StopFullscreenWatch(); } catch { }
         try { TaskbarControl.Restore(cfg); } catch { }
     }
 }

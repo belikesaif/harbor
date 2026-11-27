@@ -32,6 +32,7 @@ internal static class TrayHost
     const uint NIS_HIDDEN = 1;
     const int TraySignature = 0x34753423;
 
+    static readonly bool Diag = Environment.GetEnvironmentVariable("HARBOR_DIAG") == "1";
     static IntPtr hwnd;
     static WndProcDelegate proc; // kept alive for the lifetime of the window
     static DispatcherTimer keepOnTop;
@@ -58,7 +59,27 @@ internal static class TrayHost
         keepOnTop.Tick += (_, _) => { BringToTop(); Prune(); };
         keepOnTop.Start();
         // ask every running app to (re-)add its icons; they now reach us first
+        AnnounceTaskbarCreated();
+        // some apps are slow to answer, or only listen once their UI is idle → ask once more a little later
+        var again = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+        again.Tick += (_, _) => { again.Stop(); if (hwnd != IntPtr.Zero) AnnounceTaskbarCreated(); };
+        again.Start();
+    }
+
+    /// <summary>Broadcasts "TaskbarCreated". HWND_BROADCAST only reaches top-level windows, but many apps own their
+    /// tray icon from a hidden message-only window (WhatsApp, NVIDIA, download managers…), so post to those too.</summary>
+    static void AnnounceTaskbarCreated()
+    {
         SendNotifyMessageW((IntPtr)0xFFFF, taskbarCreated, IntPtr.Zero, IntPtr.Zero);
+        uint self = (uint)Environment.ProcessId;
+        IntPtr child = IntPtr.Zero;
+        for (int guard = 0; guard < 5000; guard++)
+        {
+            child = FindWindowExW((IntPtr)(-3) /* HWND_MESSAGE */, child, null, null);
+            if (child == IntPtr.Zero) break;
+            GetWindowThreadProcessId(child, out uint pid);
+            if (pid != self) PostMessageW(child, taskbarCreated, IntPtr.Zero, IntPtr.Zero);
+        }
     }
 
     public static void Stop()
@@ -145,17 +166,26 @@ internal static class TrayHost
         if ((flags & NIF_GUID) != 0 && nSize >= 952) { var g = new byte[16]; Marshal.Copy(n + 936, g, 0, 16); guid = new Guid(g); }
 
         var icon = Icons.FirstOrDefault(i => guid != Guid.Empty ? i.Guid == guid : i.Owner == owner && i.Id == id);
+        if (Diag)
+        {
+            GetWindowThreadProcessId(owner, out uint dpid);
+            Log.Write($"tray msg={message} known={icon != null} owner=0x{(long)owner:X} exe={System.IO.Path.GetFileName(GetProcessPath(dpid) ?? "?")} id={id} flags=0x{flags:X} guid={guid} size={size}");
+        }
         switch (message)
         {
             case NIM_ADD:
             case NIM_MODIFY:
                 if (icon == null)
                 {
-                    if (message == NIM_MODIFY) return false; // unknown icon → the app will usually re-add it
+                    // An update for an icon we never saw being added: it was added before Harbor started (many apps,
+                    // e.g. Windows Security, answer "TaskbarCreated" with a modify). Adopt it if it carries an icon.
+                    if (message == NIM_MODIFY && ((flags & NIF_ICON) == 0 || owner == IntPtr.Zero)) return false;
                     icon = new TrayIcon { Owner = owner, Id = id, Guid = guid };
                     Icons.Add(icon);
                 }
-                icon.Owner = owner;
+                // GUID-identified icons may leave hWnd empty in later updates (allowed by the API; WhatsApp does it).
+                // Keep the window we already know, otherwise the icon looks orphaned and gets pruned.
+                if (owner != IntPtr.Zero) icon.Owner = owner;
                 if ((flags & NIF_MESSAGE) != 0) icon.CallbackMessage = U(16);
                 if ((flags & NIF_ICON) != 0) icon.Icon = ToImage((IntPtr)(int)U(20)) ?? icon.Icon;
                 if ((flags & NIF_TIP) != 0) icon.Tip = Marshal.PtrToStringUni(n + 24, 128)?.Split('\0')[0].Trim() ?? "";
@@ -195,15 +225,37 @@ internal static class TrayHost
     /// <summary>Drops icons whose app quit without removing them.</summary>
     static void Prune()
     {
+        if (Diag) foreach (var i in Icons.Where(i => !IsWindow(i.Owner))) Log.Write($"tray prune: owner 0x{(long)i.Owner:X} gone, id={i.Id} tip={i.Tip}");
         if (Icons.RemoveAll(i => !IsWindow(i.Owner)) > 0) Changed?.Invoke();
     }
 
     // ───────────── talking back to the app (same messages Explorer sends) ─────────────
 
+    static readonly Guid VolumeGuid = new("7820ae73-23e3-4229-82c1-e41cb67d5b9c");
+
     public static void Click(TrayIcon ic, bool right, bool dbl = false)
     {
+        if (Diag) Log.Write($"tray click right={right} dbl={dbl} owner=0x{(long)ic.Owner:X} alive={IsWindow(ic.Owner)} v={ic.Version} cb=0x{ic.CallbackMessage:X} tip={ic.Tip}");
         if (!IsWindow(ic.Owner)) { Prune(); return; }
         GetWindowThreadProcessId(ic.Owner, out uint pid);
+        // Windows' own tray icons (volume, network…) belong to Explorer and ignore forwarded clicks, so open the
+        // matching panel ourselves: Quick Settings has the volume slider; right-click volume → Sound settings.
+        if (string.Equals(System.IO.Path.GetFileName(GetProcessPath(pid) ?? ""), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            if (right && ic.Guid == VolumeGuid) Shell.Launch("ms-settings:sound");
+            else PressKeys(VK_LWIN, 0x41 /* A */);
+            return;
+        }
+        // Icons adopted from an update (added before Harbor started) may lack the callback message, so clicks can't be
+        // forwarded. Do the obvious thing instead: open the app.
+        if (ic.CallbackMessage == 0)
+        {
+            string exe = System.IO.Path.GetFileName(GetProcessPath(pid) ?? "");
+            if (exe.Equals("SecurityHealthSystray.exe", StringComparison.OrdinalIgnoreCase)) { Shell.Launch("windowsdefender:"); return; }
+            var win = WindowTracker.Enumerate().FirstOrDefault(w => { GetWindowThreadProcessId(w.Hwnd, out uint p); return p == pid; });
+            if (win != null) ActivateWindow(win.Hwnd);
+            return;
+        }
         AllowSetForegroundWindow(pid);
         if (right) { Send(ic, 0x0204); Send(ic, 0x0205); if (ic.Version >= 4) Send(ic, 0x007B /* WM_CONTEXTMENU */); }
         else if (dbl) { Send(ic, 0x0203); Send(ic, 0x0202); }

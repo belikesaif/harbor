@@ -39,8 +39,9 @@ internal static class Ui
 
     public static Border Tile(double width, Brush bg, UIElement child, Brush stroke = null) => new()
     {
-        Width = width, Height = H, CornerRadius = new CornerRadius(15), Background = bg,
-        BorderBrush = stroke ?? B(0x22FFFFFF), BorderThickness = new Thickness(0.8), Child = child, ClipToBounds = true
+        // 22.5% corner radius ≈ the macOS app-icon squircle, so widgets sit naturally next to real app icons
+        Width = width, Height = H, CornerRadius = new CornerRadius(14.4), Background = bg,
+        BorderBrush = stroke ?? new LinearGradientBrush(C(0x40FFFFFF), C(0x0FFFFFFF), 90), BorderThickness = new Thickness(0.8), Child = child, ClipToBounds = true
     };
 
     public static Viewbox Wrap(FrameworkElement e) => new() { Child = e, Stretch = Stretch.Uniform };
@@ -211,7 +212,7 @@ internal class SystemWidget
         if (hasBattery) { bat = new Ring("BAT", 0xFFFFD60A); row.Children.Add(bat.Root); }
         double w = hasBattery ? 150 : 104;
         Aspect = w / Ui.H;
-        View = Ui.Wrap(Ui.Tile(w, Ui.B(0x1FFFFFFF), row));
+        View = Ui.Wrap(Ui.Tile(w, Ui.Grad(0xFF3A3A3C, 0xFF1C1C1E), row));
         GetSystemTimes(out lastIdle, out lastKernel, out lastUser);
         Update();
     }
@@ -311,7 +312,7 @@ internal class MediaWidget
         buttons.Children.Add(playGlyph);
         buttons.Children.Add(Glyph("", async () => { if (session != null) await session.TrySkipNextAsync(); }));
         Grid.SetColumn(buttons, 2); g.Children.Add(buttons);
-        View = Ui.Wrap(Ui.Tile(176, Ui.B(0x1FFFFFFF), g));
+        View = Ui.Wrap(Ui.Tile(176, Ui.Grad(0xFF3A3A3C, 0xFF1C1C1E), g));
         Init();
     }
 
