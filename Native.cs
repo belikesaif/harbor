@@ -22,6 +22,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int max);
@@ -46,10 +47,12 @@ internal static class Native
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string s);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
     [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateRoundRectRgn(int l, int t, int r, int b, int w, int h);
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr h);
     [DllImport("gdi32.dll", EntryPoint = "GetObjectW")] public static extern int GetObject(IntPtr h, int size, out DIBSECTION ds);
 
@@ -62,9 +65,9 @@ internal static class Native
     public struct WindowCompositionAttribData { public int Attribute; public IntPtr Data; public int SizeOfData; }
     [DllImport("user32.dll")] public static extern int SetWindowCompositionAttribute(IntPtr h, ref WindowCompositionAttribData d);
 
-    public static void EnableAcrylic(IntPtr hwnd, uint abgr)
+    public static void EnableAcrylic(IntPtr hwnd, uint abgr, int state = 4 /* acrylic */)
     {
-        var accent = new AccentPolicy { AccentState = 4 /* acrylic */, AccentFlags = 2, GradientColor = abgr };
+        var accent = new AccentPolicy { AccentState = state, AccentFlags = 2, GradientColor = abgr };
         int size = Marshal.SizeOf(accent);
         IntPtr p = Marshal.AllocHGlobal(size);
         try
@@ -270,15 +273,30 @@ internal static class Native
         for (int i = keys.Length - 1; i >= 0; i--) keybd_event(keys[i], 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
     }
 
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr h, bool altTab);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+
+    /// <summary>Brings a window to the front reliably. Windows' foreground lock often refuses a plain
+    /// SetForegroundWindow from a no-activate dock (it failed ~50% of the time in testing), so: join the current
+    /// foreground thread's input queue for the call (which makes us "the foreground app" for that moment), and as a
+    /// last resort use the same switch Alt+Tab uses. No synthetic Alt press: that could pop open the target's menu bar.</summary>
     public static void ActivateWindow(IntPtr h)
     {
-        if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
-        if (!SetForegroundWindow(h) || GetForegroundWindow() != h)
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        if (SetForegroundWindow(h) && GetForegroundWindow() == h) return;
+
+        IntPtr fg = GetForegroundWindow();
+        uint me = GetCurrentThreadId(), fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+        bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+        try
         {
-            // Foreground-lock workaround: a synthetic Alt press grants us foreground rights.
-            keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+            BringWindowToTop(h);
             SetForegroundWindow(h);
-            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
+        finally { if (attached) AttachThreadInput(me, fgThread, false); }
+
+        if (GetForegroundWindow() != h) SwitchToThisWindow(h, true);
     }
 }

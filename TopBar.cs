@@ -30,6 +30,7 @@ internal class TopBar : Window
     IntPtr hwnd;
     double dpi = 1;
     public string MonitorDevice => monitorDevice;
+    public MonitorInfo Monitor => mon;
 
     readonly StackPanel trayRow = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     readonly Border trayPill, clockPill, statusPill, dayLine;
@@ -207,7 +208,7 @@ internal class TopBar : Window
         return IntPtr.Zero;
     }
 
-    void SetFullscreen(bool fs)
+    public void SetFullscreen(bool fs)
     {
         if (fs && !FullscreenAppHere()) return; // a fullscreen app on another monitor
         if (fs == fullscreen) return;

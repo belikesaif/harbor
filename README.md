@@ -27,7 +27,8 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 | | |
 |---|---|
 | 🔍 **Magnification** | Raised-cosine wave, frame-rate independent, adjustable (Off / Subtle / Classic / Maximum) |
-| 🧊 **Frosted glass** | Native DWM acrylic blur, clipped to a rounded bar |
+| 🧊 **Frosted glass** | Real desktop blur (Windows.UI.Composition) clipped to a smooth, anti-aliased rounded bar, with a soft contact shadow |
+| 🫥 **Auto-hide** | Optional: the dock slides away and apps get the full screen; push the pointer to the bottom edge to bring it back |
 | 🖼️ **Hi-res icons** | 128 px shell icons, including Store/MSIX apps (WhatsApp, Spotify, Photos…) |
 | 🟢 **Running apps** | Indicator dots, click to focus / minimize / cycle windows, right-click window list, Quit |
 | 🌊 **Top bar (Tide Line)** | A slim frosted strip with tray icons, clock and Wi-Fi / Bluetooth / battery. Its space is reserved like a taskbar, so it never covers browser tabs or title bars. Hover anything to read its details |
@@ -37,7 +38,9 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 | 🖥️ **Multi-monitor** | One dock per screen, per-monitor DPI aware |
 | ✋ **Drag & drop** | Reorder pins, drag off to remove, drop any app/file/folder to pin |
 | 🧭 **Shortcuts** | Start, Quick Settings, Downloads stack, Recycle Bin (empty from the menu) |
-| 🎬 **Fullscreen aware** | Hides itself for games and fullscreen video |
+| 🎬 **Fullscreen aware** | Hides itself for games, fullscreen video and browser F11 (its own detection, reacts instantly) |
+| ⌨️ **Win + 1…9** | Opens / switches to / minimizes the Nth app in the dock, like the Windows taskbar |
+| 📌 **Taskbar pin sync** | "Pin to taskbar" / "Unpin from taskbar" in the Start menu update the dock too, including Store apps |
 
 ## ⚡ Why it's light
 
@@ -49,7 +52,7 @@ Emergency: run `Harbor.exe --restore-taskbar`.
 
 ## ⚙️ Settings
 
-Right-click the dock for icon size, magnification, widgets, clock style (digital / analog / both), seconds, the top bar, hiding the Windows taskbar and autostart.
+Right-click the dock for icon size, magnification, auto-hide, widgets, clock style (digital / analog / both), seconds, the top bar, hiding the Windows taskbar and autostart.
 Everything is stored in `%APPDATA%\Harbor\config.json`.
 
 | In the top bar | |
@@ -82,6 +85,7 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 | `TopBar.cs` | Tide Line top bar: reserved strip (AppBar), clock read-out, Wi-Fi / Bluetooth / battery |
 | `TrayHost.cs` | Notification-area host: mirrors app tray icons and forwards everything to Explorer |
 | `Native.cs` | Win32 / DWM / Shell interop |
+| `Glass.cs` | The frosted-glass layer behind the dock (composition blur + rounded clip, legacy acrylic fallback) |
 | `Program.cs` | Entry point, glass window, one dock + top bar per monitor (follows monitors in and out), taskbar restore |
 
 ## 🤝 Contributing

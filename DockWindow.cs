@@ -32,17 +32,20 @@ internal class DockCell : Grid
         VerticalAlignment = VerticalAlignment.Bottom;
         Background = Brushes.Transparent;
         RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        RowDefinitions.Add(new RowDefinition { Height = new GridLength(DockWindow.DotRow) });
+        RowDefinitions.Add(new RowDefinition { Height = new GridLength(DockWindow.PadFor(54)) });
         Host = new Border { Child = content, VerticalAlignment = VerticalAlignment.Bottom, RenderTransform = Lift };
         Children.Add(Host);
-        Dot = new Ellipse { Width = 4, Height = 4, Fill = Ui.B(0xD9FFFFFF), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Hidden };
+        // macOS-style running indicator: a small, soft dot centred in the bottom padding
+        Dot = new Ellipse { Width = 4, Height = 4, Fill = Ui.B(0xCCFFFFFF), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Hidden, IsHitTestVisible = false };
         SetRow(Dot, 1);
         Children.Add(Dot);
     }
 
     public double BaseWidth(double b) => b * Aspect + 2 * Margin_(b);
-    public static double Margin_(double b) => Math.Round(b * 0.055, 1);
+    /// <summary>Half the gap between two icons (≈ 6 px gap at 54 px icons, like the macOS Dock).</summary>
+    public static double Margin_(double b) => Math.Round(b * 0.06, 1);
 
+    double lastPad = -1;
     public void ApplySize(double b)
     {
         double s = Kind == "sep" ? 1 : Scale;
@@ -50,12 +53,27 @@ internal class DockCell : Grid
         Margin = new Thickness(m, 0, m, 0);
         Width = Math.Max(0, b * Aspect * s);
         Host.Height = Math.Max(0, b * s);
+        double pad = DockWindow.PadFor(b);
+        if (pad != lastPad)
+        {
+            lastPad = pad;
+            RowDefinitions[1].Height = new GridLength(pad);
+            double d = Math.Clamp(Math.Round(b * 0.075), 4, 6);
+            Dot.Width = Dot.Height = d;
+        }
     }
 }
 
 internal class DockWindow : Window
 {
-    public const double DotRow = 9, TopPad = 6, Pad = 7, Gap = 6;
+    /// <summary>Space between the screen edge and the floating bar.</summary>
+    public const double Gap = 6;
+    /// <summary>Vertical padding above and below the icons: equal on both sides so icons sit visually centred
+    /// (the running dot lives inside the bottom padding, exactly like macOS).</summary>
+    public static double PadFor(double b) => Math.Round(Math.Max(5, b * 0.14));
+    double PadV => PadFor(Base);
+    /// <summary>Horizontal bar padding, chosen so the outer icons have the same breathing room as top/bottom.</summary>
+    double Pad => Math.Max(2, PadV - DockCell.Margin_(Base));
     readonly Config cfg;
     readonly GlassWindow glass;
     readonly string monitorDevice;
@@ -64,11 +82,23 @@ internal class DockWindow : Window
     double dpi = 1;
 
     readonly Grid outer = new(), root = new();
-    readonly Border bar = new();
+    readonly Border bar = new(), sheen = new();
+    readonly Border[] shadow = new Border[3];
     readonly StackPanel stack = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Bottom };
     readonly Canvas overlay = new() { IsHitTestVisible = false };
-    readonly Border label;
+    readonly FrameworkElement label;
     readonly TextBlock labelText;
+    readonly TranslateTransform slide = new();
+    // auto-hide: a 2 px invisible strip along the screen edge reveals the dock, like macOS
+    readonly Border hotZone = new() { Height = 2, VerticalAlignment = VerticalAlignment.Bottom, Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)) };
+    readonly DispatcherTimer hideTimer = new() { Interval = TimeSpan.FromMilliseconds(450) };
+    readonly DispatcherTimer revealTimer = new() { Interval = TimeSpan.FromMilliseconds(120) };
+    // WPF doesn't reliably report "mouse left" for this no-activate window when the pointer leaves fast, which left
+    // icons stuck magnified. While the pointer is (or was) over the dock, verify its real position 10×/s.
+    readonly DispatcherTimer leaveWatch = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    double hideAmt, hideTarget; // 0 = shown, 1 = fully hidden
+    bool menuOpen;
+    bool AutoHide => cfg.AutoHide;
 
     readonly List<DockEntry> pinned = new();
     readonly Dictionary<string, DockEntry> running = new();
@@ -109,7 +139,7 @@ internal class DockWindow : Window
         ApplySizes();
         if (appBarRegistered) SetAppBarPos();
     }
-    double BarH => Base + TopPad + DotRow;
+    double BarH => Base + 2 * PadV;
 
     public string MonitorDevice => monitorDevice;
     public GlassWindow Glass => glass;
@@ -134,31 +164,73 @@ internal class DockWindow : Window
         RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.HighQuality);
         TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
 
+        // Soft contact shadow + dark outer hairline, drawn as thin rings *outside* the bar only, so the frosted
+        // glass itself never gets darker. Plain strokes cost nothing compared to a blur effect.
+        uint[] shadowAlpha = { 0x47000000, 0x1C000000, 0x0B000000 };
+        for (int i = 0; i < shadow.Length; i++)
+        {
+            shadow[i] = new Border { VerticalAlignment = VerticalAlignment.Bottom, BorderThickness = new Thickness(1), BorderBrush = Ui.B(shadowAlpha[i]), IsHitTestVisible = false };
+            root.Children.Add(shadow[i]);
+        }
         bar.VerticalAlignment = VerticalAlignment.Bottom;
         bar.BorderThickness = new Thickness(1);
-        bar.BorderBrush = new LinearGradientBrush(Ui.C(0x59FFFFFF), Ui.C(0x1AFFFFFF), 90);
-        bar.Background = new LinearGradientBrush(Ui.C(0x24FFFFFF), Ui.C(0x0AFFFFFF), 90);
+        // light inner hairline, brighter along the top edge (catches the light like the macOS Dock)
+        bar.BorderBrush = new LinearGradientBrush(new GradientStopCollection
+        {
+            new GradientStop(Ui.C(0x5CFFFFFF), 0), new GradientStop(Ui.C(0x24FFFFFF), 0.35), new GradientStop(Ui.C(0x14FFFFFF), 1)
+        }, 90);
+        bar.Background = new LinearGradientBrush(Ui.C(0x1CFFFFFF), Ui.C(0x08FFFFFF), 90);
         root.Children.Add(bar);
         root.Children.Add(stack);
         root.HorizontalAlignment = HorizontalAlignment.Center;
         root.VerticalAlignment = VerticalAlignment.Bottom;
+        root.Margin = new Thickness(0, 0, 0, Gap);
+        root.RenderTransform = slide;
         root.Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)); // keeps the magnified zone hoverable
         root.AllowDrop = true;
         outer.Children.Add(root);
+        outer.Children.Add(hotZone);
         outer.Children.Add(overlay);
         Content = outer;
 
-        labelText = new TextBlock { Foreground = Brushes.White, FontSize = 13, FontFamily = Ui.Font };
-        label = new Border
+        // tooltip: dark rounded pill with a little arrow pointing at the icon
+        labelText = new TextBlock { Foreground = Ui.B(0xF2FFFFFF), FontSize = 13, FontFamily = Ui.Font };
+        var pill = new Border
         {
-            Child = labelText, CornerRadius = new CornerRadius(7), Padding = new Thickness(10, 4, 10, 5),
-            Background = Ui.B(0xEB2C2C2E), BorderBrush = Ui.B(0x33FFFFFF), BorderThickness = new Thickness(0.8),
-            Visibility = Visibility.Collapsed
+            Child = labelText, CornerRadius = new CornerRadius(7), Padding = new Thickness(11, 4, 11, 5),
+            Background = Ui.B(0xF0262628), BorderBrush = Ui.B(0x40FFFFFF), BorderThickness = new Thickness(0.8)
         };
+        var arrow = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M0,0 L7,6.5 L14,0 Z"), Fill = Ui.B(0xF0262628), HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, -1, 0, 0)
+        };
+        var tip = new StackPanel { Visibility = Visibility.Collapsed, IsHitTestVisible = false };
+        tip.Children.Add(pill); tip.Children.Add(arrow);
+        label = tip;
         overlay.Children.Add(label);
 
+        hotZone.MouseEnter += (_, _) => { if (AutoHide && hideTarget > 0) revealTimer.Start(); };
+        hotZone.MouseLeave += (_, _) => revealTimer.Stop();
+        revealTimer.Tick += (_, _) => { revealTimer.Stop(); SetHidden(false); };
+        // While revealed, check the real cursor position a couple of times a second (WPF can miss "mouse left"
+        // on a no-activate window) and tuck the dock away once the pointer has moved off it.
+        hideTimer.Tick += (_, _) =>
+        {
+            if (!AutoHide || hideTarget > 0) { hideTimer.Stop(); return; }
+            if (menuOpen || pressCell != null || CursorNearDock()) return;
+            hideTimer.Stop();
+            SetHidden(true);
+        };
+
         root.MouseMove += Root_MouseMove;
+        leaveWatch.Tick += (_, _) =>
+        {
+            if (pressCell != null || menuOpen) return;
+            if (!CursorOverRoot()) { leaveWatch.Stop(); OnLeave(); }
+        };
         root.MouseLeave += (_, _) => { if (pressCell == null) OnLeave(); };
+        root.MouseLeftButtonDown += Root_MouseLeftButtonDown;
         root.MouseLeftButtonUp += Root_MouseLeftButtonUp;
         root.MouseRightButtonUp += (_, e) => { if (!e.Handled) { ShowMenu(BuildPrefsMenu(), null); e.Handled = true; } };
         root.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Link : DragDropEffects.None; e.Handled = true; };
@@ -178,6 +250,7 @@ internal class DockWindow : Window
         long ex = (long)GetWindowLongPtr(hwnd, GWL_EXSTYLE);
         ex = (ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW;
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, (IntPtr)ex);
+        SetWindowLongPtr(hwnd, -8 /* GWLP_HWNDPARENT: owner */, glass.Handle); // owned → always stacked above the glass
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
         // move onto our monitor first so WPF adopts that screen's DPI
         SetWindowPos(hwnd, IntPtr.Zero, mon.Bounds.Left + 10, mon.Bounds.Top + 10, 100, 100, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -189,6 +262,7 @@ internal class DockWindow : Window
         BuildStaticCells();
         ReloadPins();
         ApplySizes();
+        if (AutoHide) { hideAmt = hideTarget = 1; ApplySlide(); }
         RegisterAppBar();
 
         winEventProc = OnWinEvent;
@@ -201,7 +275,7 @@ internal class DockWindow : Window
     void BuildStaticCells()
     {
         var lp = new LaunchpadTile();
-        launchCell = new DockCell("sys", lp.View) { Label = () => "Start", Click = () => PressKeys(VK_LWIN), RightClick = c => ShowMenu(BuildPrefsMenu(), c) };
+        launchCell = new DockCell("sys", lp.View) { Label = () => "Start", Click = TaskbarControl.OpenStart, RightClick = c => ShowMenu(BuildPrefsMenu(), c) };
 
         cal = new CalendarTile();
         calCell = new DockCell("widget", cal.View) { Label = () => DateTime.Now.ToString("dddd, MMMM d, yyyy"), Click = () => PressKeys(VK_LWIN, 0x4E /*N*/) };
@@ -229,8 +303,10 @@ internal class DockWindow : Window
 
     DockCell Separator()
     {
-        var line = new Border { Width = 1, Background = Ui.B(0x40FFFFFF), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Stretch, Margin = new Thickness(0, 6, 0, 4) };
-        var c = new DockCell("sep", line) { Aspect = 0.2 };
+        // thin hairline, ~75% of the icon height, centred: the macOS divider
+        var line = new Border { Width = 1, Background = Ui.B(0x3DFFFFFF), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Stretch };
+        line.SizeChanged += (_, _) => { double h = line.Parent is Border p ? p.ActualHeight : 0; var m = Math.Round(h * 0.13); if (line.Margin.Top != m) line.Margin = new Thickness(0, m, 0, m); };
+        var c = new DockCell("sep", line) { Aspect = 0.22 };
         c.MouseRightButtonUp += (_, e) => { ShowMenu(BuildPrefsMenu(), null); e.Handled = true; };
         return c;
     }
@@ -253,16 +329,46 @@ internal class DockWindow : Window
     {
         c.MouseEnter += (_, _) => { if (pressCell == null) ShowLabel(c); };
         c.MouseLeave += (_, _) => { if (hovered == c && pressCell == null) HideLabel(); };
-        c.MouseLeftButtonDown += (_, e) =>
-        {
-            pressCell = c; pressPt = e.GetPosition(this); dragging = false;
-            c.Host.Opacity = 0.72; root.CaptureMouse(); e.Handled = true;
-        };
+        c.MouseLeftButtonDown += (_, e) => BeginPress(c, e);
         c.MouseDown += (_, e) => { if (e.ChangedButton == MouseButton.Middle && c.Entry != null) { Shell.Launch(c.Entry.LaunchPath, c.Entry.LaunchArgs); Bounce(c); e.Handled = true; } };
         c.MouseRightButtonUp += (_, e) => { HideLabel(); c.RightClick?.Invoke(c); e.Handled = true; };
     }
 
+    void BeginPress(DockCell c, MouseButtonEventArgs e)
+    {
+        pressCell = c; pressPt = e.GetPosition(this); dragging = false;
+        c.Host.Opacity = 0.72; root.CaptureMouse(); e.Handled = true;
+    }
+
+    /// <summary>A press that landed in the gap between two icons goes to the nearest icon (no dead zones, like macOS).</summary>
+    void Root_MouseLeftButtonDown(object s, MouseButtonEventArgs e)
+    {
+        if (e.Handled) return;
+        // only inside the bar itself, never in the transparent zone above it (that looks like desktop)
+        if (e.GetPosition(bar).Y < 0) return;
+        double x = e.GetPosition(this).X;
+        DockCell best = null; double bestD = double.MaxValue;
+        foreach (var c in cells)
+        {
+            if (c.Kind == "sep" || !c.IsLoaded) continue;
+            double center = c.TranslatePoint(new Point(c.ActualWidth / 2, 0), this).X;
+            double reach = c.ActualWidth / 2 + c.Margin.Left + 1;
+            double d = Math.Abs(x - center);
+            if (d <= reach && d < bestD) { best = c; bestD = d; }
+        }
+        if (best != null) BeginPress(best, e);
+    }
+
     // ───────────────────────────── apps ─────────────────────────────
+
+    public void ReloadPinsFromConfig() => ReloadPins();
+
+    /// <summary>Win+1…9: open / switch to / minimize the Nth app in the dock, like the Windows taskbar.</summary>
+    public void ActivatePin(int index)
+    {
+        var apps = cells.Where(c => c.Kind == "app" && c.Entry != null).ToList();
+        if (index < apps.Count) apps[index].Click?.Invoke();
+    }
 
     void ReloadPins()
     {
@@ -396,11 +502,14 @@ internal class DockWindow : Window
 
     void Bounce(DockCell c)
     {
-        var a = new DoubleAnimation(0, -Base * 0.42, TimeSpan.FromMilliseconds(260))
+        // macOS-style launch bounce: each hop a little lower, with ease-out going up and ease-in falling back
+        var a = new DoubleAnimationUsingKeyFrames();
+        double t = 0;
+        foreach (var (h, ms) in new[] { (0.5, 300.0), (0.32, 250.0), (0.16, 200.0) })
         {
-            AutoReverse = true, RepeatBehavior = new RepeatBehavior(3),
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
-        };
+            t += ms * 0.5; a.KeyFrames.Add(new EasingDoubleKeyFrame(-Base * h, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(t)), new QuadraticEase { EasingMode = EasingMode.EaseOut }));
+            t += ms * 0.5; a.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(t)), new QuadraticEase { EasingMode = EasingMode.EaseIn }));
+        }
         c.Lift.BeginAnimation(TranslateTransform.YProperty, a);
     }
 
@@ -430,6 +539,9 @@ internal class DockWindow : Window
 
     void Root_MouseMove(object s, MouseEventArgs e)
     {
+        // WPF re-raises MouseMove with its last known position whenever the layout changes (e.g. icons shrinking back);
+        // if the pointer actually left without WPF noticing, that stale position would magnify the icons again.
+        if (pressCell == null && !CursorOverRoot()) { if (cells.Any(c => c.Target != 1)) OnLeave(); return; }
         var p = e.GetPosition(this);
         if (pressCell != null && e.LeftButton == MouseButtonState.Pressed)
         {
@@ -437,6 +549,7 @@ internal class DockWindow : Window
             if (dragging) { DragMove(p); return; }
         }
         UpdateTargets(p.X);
+        if (!leaveWatch.IsEnabled) leaveWatch.Start();
     }
 
     void DragMove(Point p)
@@ -479,8 +592,11 @@ internal class DockWindow : Window
         }
         else
         {
+            // A press + release that didn't travel is a click on the pressed icon, even if magnification slid the icon
+            // a little under a still pointer in between (checking the icon's bounds dropped such clicks).
             var pc = e.GetPosition(c);
-            if (pc.X >= 0 && pc.Y >= 0 && pc.X <= c.ActualWidth && pc.Y <= c.ActualHeight) c.Click?.Invoke();
+            bool inside = pc.X >= 0 && pc.Y >= 0 && pc.X <= c.ActualWidth && pc.Y <= c.ActualHeight;
+            if (inside || (p - pressPt).Length < 10) c.Click?.Invoke();
         }
         if (!root.IsMouseOver) OnLeave(); else UpdateTargets(p.X);
     }
@@ -492,8 +608,28 @@ internal class DockWindow : Window
         StartAnim();
     }
 
+    // WPF sometimes never reports "mouse left" (e.g. a window maximized under the pointer via the keyboard), which
+    // left icons stuck magnified. While anything is magnified, check the real cursor position a few times a second.
+    readonly DispatcherTimer magWatch = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    bool magWatchWired;
+
+    void WatchMagnification()
+    {
+        if (!magWatchWired)
+        {
+            magWatchWired = true;
+            magWatch.Tick += (_, _) =>
+            {
+                if (cells.All(c => c.Target == 1)) { magWatch.Stop(); return; }
+                if (pressCell == null && !menuOpen && !CursorNearDock()) { magWatch.Stop(); OnLeave(); }
+            };
+        }
+        if (!magWatch.IsEnabled) magWatch.Start();
+    }
+
     void UpdateTargets(double mouseX)
     {
+        WatchMagnification();
         double mag = cfg.Magnification;
         double total = 2 * Pad + cells.Sum(c => c.BaseWidth(Base));
         double x = (outer.ActualWidth - total) / 2 + Pad;
@@ -531,6 +667,10 @@ internal class DockWindow : Window
             if (Math.Abs(diff) < 0.002) c.Scale = c.Target; else { c.Scale += diff * k; moving = true; }
             c.ApplySize(Base);
         }
+        // auto-hide slide (a touch slower than magnification so it reads as a glide)
+        double hd = hideTarget - hideAmt;
+        if (Math.Abs(hd) < 0.003) hideAmt = hideTarget; else { hideAmt += hd * (1 - Math.Exp(-dt * 16)); moving = true; }
+        ApplySlide();
         outer.UpdateLayout();
         PositionLabel();
         SyncGlass();
@@ -541,13 +681,15 @@ internal class DockWindow : Window
     {
         hovered = c;
         string s = c.Label?.Invoke();
-        if (string.IsNullOrEmpty(s) || dragging) { label.Visibility = Visibility.Collapsed; return; }
-        labelText.Text = s;
+        if (string.IsNullOrEmpty(s) || dragging || hideAmt > 0.5) { label.Visibility = Visibility.Collapsed; return; }
+        bool wasHidden = label.Visibility != Visibility.Visible;
+        if (labelText.Text != s) labelText.Text = s;
         label.Visibility = Visibility.Visible;
         PositionLabel();
+        if (wasHidden) label.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120)));
     }
 
-    void HideLabel() { hovered = null; label.Visibility = Visibility.Collapsed; }
+    void HideLabel() { hovered = null; label.BeginAnimation(OpacityProperty, null); label.Visibility = Visibility.Collapsed; }
 
     void PositionLabel()
     {
@@ -556,7 +698,7 @@ internal class DockWindow : Window
         var sz = label.DesiredSize;
         var p = hovered.Host.TranslatePoint(new Point(hovered.Host.ActualWidth / 2, 0), overlay);
         Canvas.SetLeft(label, Math.Clamp(p.X - sz.Width / 2, 4, Math.Max(4, overlay.ActualWidth - sz.Width - 4)));
-        Canvas.SetTop(label, Math.Max(0, p.Y - sz.Height - 10));
+        Canvas.SetTop(label, Math.Max(0, p.Y - sz.Height - 6));
     }
 
     // ───────────────────────────── glass, appbar ─────────────────────────────
@@ -564,14 +706,62 @@ internal class DockWindow : Window
     void ApplySizes()
     {
         bar.Height = BarH;
-        bar.CornerRadius = new CornerRadius(Math.Round(BarH * 0.3));
+        double r = Math.Round(BarH * 0.29);
+        bar.CornerRadius = new CornerRadius(r);
+        for (int i = 0; i < shadow.Length; i++)
+        {
+            double k = i + 1;
+            shadow[i].Height = BarH + 2 * k;
+            shadow[i].Margin = new Thickness(-k, 0, -k, -k);
+            shadow[i].CornerRadius = new CornerRadius(r + k);
+        }
         stack.Margin = new Thickness(Pad, 0, Pad, 0);
         foreach (var c in cells) c.ApplySize(Base);
+        ApplySlide();
+    }
+
+    /// <summary>Moves the dock along its auto-hide path (0 = shown, 1 = tucked below the screen edge).</summary>
+    void ApplySlide()
+    {
+        double y = Math.Round(hideAmt * (BarH + Gap + 6));
+        if (slide.Y != y) slide.Y = y;
+    }
+
+    void SetHidden(bool hide)
+    {
+        double t = hide ? 1 : 0;
+        if (hideTarget == t) return;
+        hideTarget = t;
+        if (hide) { HideLabel(); hideTimer.Stop(); }
+        else if (AutoHide) hideTimer.Start();
+        hotZone.Visibility = AutoHide ? Visibility.Visible : Visibility.Collapsed;
+        StartAnim();
+    }
+
+    bool CursorOverRoot()
+    {
+        if (!GetCursorPos(out var p) || root.ActualWidth < 1) return false;
+        var tl = root.PointToScreen(new Point(0, 0));
+        var br = root.PointToScreen(new Point(root.ActualWidth, root.ActualHeight));
+        return p.X >= tl.X && p.X < br.X && p.Y >= tl.Y && p.Y < br.Y;
+    }
+
+    /// <summary>True while the pointer is over the dock (including its magnified zone) or the strip below it.</summary>
+    bool CursorNearDock()
+    {
+        if (!GetCursorPos(out var p) || root.ActualWidth < 1) return false;
+        var tl = root.PointToScreen(new Point(0, 0));
+        var br = root.PointToScreen(new Point(root.ActualWidth, root.ActualHeight));
+        return p.X >= tl.X && p.X <= br.X && p.Y >= tl.Y - 4 && p.Y <= mon.Bounds.Bottom;
     }
 
     void SyncGlass()
     {
         if (hwnd == IntPtr.Zero || !IsVisible || bar.ActualWidth < 1) return;
+        // fully tucked away → hide the blur layer too (it would otherwise peek onto a monitor below)
+        bool tucked = hideAmt > 0.985;
+
+        if (tucked) { glass.Park(); return; }
         var tl = bar.PointToScreen(new Point(0, 0));
         var br = bar.PointToScreen(new Point(bar.ActualWidth, bar.ActualHeight));
         glass.Place((int)Math.Round(tl.X), (int)Math.Round(tl.Y), (int)Math.Round(br.X - tl.X), (int)Math.Round(br.Y - tl.Y),
@@ -596,7 +786,9 @@ internal class DockWindow : Window
         if (hwnd == IntPtr.Zero) return;
         var m = CurrentMonitor(); dpi = m.Dpi;
         var b = m.Bounds;
-        int reserve = (int)Math.Round((BarH + Gap * 2) * dpi);
+        // Reserve just the bar plus the gap below it (windows may come right up to the dock, as on macOS).
+        // With auto-hide on, nothing is reserved: apps get the whole screen and the dock slides over them.
+        int reserve = AutoHide ? 0 : (int)Math.Round((BarH + Gap * 2) * dpi);
         var abd = NewAbd();
         abd.uEdge = ABE_BOTTOM;
         abd.rc = new RECT { Left = b.Left, Top = b.Bottom - reserve, Right = b.Right, Bottom = b.Bottom };
@@ -604,10 +796,19 @@ internal class DockWindow : Window
         abd.rc.Top = abd.rc.Bottom - reserve;
         TrayHost.AppBarMessage(ABM_SETPOS, ref abd);
         bottomPx = abd.rc.Bottom;
+        hotZone.Visibility = AutoHide ? Visibility.Visible : Visibility.Collapsed;
         PositionWindow();
     }
 
-    int lastWinW = -1, lastWinH = -1;
+    /// <summary>Called when the auto-hide setting changes.</summary>
+    void ApplyAutoHide()
+    {
+        SetAppBarPos();
+        if (AutoHide) hideTimer.Start(); // tucks away as soon as the pointer leaves (e.g. after the menu closes)
+        else { hideTimer.Stop(); SetHidden(false); }
+    }
+
+    int lastWinW = -1, lastWinH = -1, lastWinY = int.MinValue;
 
     /// <summary>Keeps the (layered) window only as big as the dock can ever get → less pixels to compose each frame.</summary>
     void PositionWindow()
@@ -616,18 +817,22 @@ internal class DockWindow : Window
         var b = mon.Bounds; int sw = b.Right - b.Left;
         double content = 2 * Pad + cells.Sum(c => c.BaseWidth(Base)) + Base * Math.Max(0, cfg.Magnification - 1) * 2.8 + 220;
         int wPx = Math.Min(sw, (int)Math.Ceiling(content * dpi));
-        double winH = Base * Math.Max(cfg.Magnification, 1.5) + DotRow + 52;
+        // tall enough for magnified icons + the tooltip above them; the window sits flush with the screen/work-area
+        // bottom and the bar floats `Gap` above it (root's bottom margin), leaving room for the soft shadow.
+        double winH = Base * Math.Max(cfg.Magnification, 1.5) + 2 * PadV + Gap + 52;
         int hPx = (int)Math.Ceiling(winH * dpi);
-        int gapPx = (int)Math.Round(Gap * dpi);
-        if (wPx != lastWinW || hPx != lastWinH)
+        int y = bottomPx - hPx;
+        if (wPx != lastWinW || hPx != lastWinH || y != lastWinY)
         {
-            SetWindowPos(hwnd, IntPtr.Zero, b.Left + (sw - wPx) / 2, bottomPx - gapPx - hPx, wPx, hPx, SWP_NOZORDER | SWP_NOACTIVATE);
-            lastWinW = wPx; lastWinH = hPx;
+            SetWindowPos(hwnd, IntPtr.Zero, b.Left + (sw - wPx) / 2, y, wPx, hPx, SWP_NOZORDER | SWP_NOACTIVATE);
+            lastWinW = wPx; lastWinH = hPx; lastWinY = y;
         }
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, SyncGlass);
     }
 
-    void SetFullscreen(bool fs)
+    public MonitorInfo Monitor => mon;
+
+    public void SetFullscreen(bool fs)
     {
         if (fs)
         {
@@ -749,7 +954,12 @@ internal class DockWindow : Window
         var esc = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
         esc.Tick += (_, _) => { if (!m.IsOpen) esc.Stop(); else if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) m.IsOpen = false; };
         esc.Start();
-        m.Closed += (_, _) => { esc.Stop(); UnhookMenu(); };
+        menuOpen = true; hideTimer.Stop();
+        m.Closed += (_, _) =>
+        {
+            esc.Stop(); UnhookMenu(); menuOpen = false;
+            if (AutoHide && hideTarget == 0) hideTimer.Start();
+        };
     }
 
     void UnhookMenu()
@@ -783,6 +993,12 @@ internal class DockWindow : Window
         }
         m.Items.Add(new Separator());
         m.Items.Add(Item(e.Running ? "New Window" : "Open", () => { Shell.Launch(e.LaunchPath, e.LaunchArgs); if (!e.Running) Bounce(appCells[e]); }));
+        // Chrome's jump-list task, like on the Windows taskbar
+        if (e.ExePath != null && System.IO.Path.GetFileName(e.ExePath).Equals("chrome.exe", StringComparison.OrdinalIgnoreCase) && File.Exists(e.ExePath))
+        {
+            string chrome = e.ExePath;
+            m.Items.Add(Item("New Incognito Window", () => { Shell.Launch(chrome, "--incognito"); if (!e.Running) Bounce(appCells[e]); }));
+        }
         m.Items.Add(e.Pinned ? Item("Remove from Dock", () => Unpin(e)) : Item("Keep in Dock", () => Pin(e)));
         string exe = e.ExePath ?? (File.Exists(e.LaunchPath) ? e.LaunchPath : null);
         if (exe != null && File.Exists(exe)) m.Items.Add(Item("Show in File Explorer", () => Shell.ShowInExplorer(exe)));
@@ -833,6 +1049,8 @@ internal class DockWindow : Window
         foreach (var (n, v) in new[] { ("Off", 1.0), ("Subtle", 1.4), ("Classic", 1.75), ("Maximum", 2.1) })
             mag.Items.Add(Item(n, () => { cfg.Magnification = v; cfg.Save(); Relayout(); }, true, Math.Abs(cfg.Magnification - v) < 0.01));
         m.Items.Add(mag);
+        m.Items.Add(Item("Automatically Hide Dock", () => { cfg.AutoHide = !cfg.AutoHide; cfg.Save(); Program.ApplyAutoHide(); }, true, cfg.AutoHide));
+        m.Items.Add(new Separator());
         m.Items.Add(Item("Show Widgets", () => { cfg.ShowWidgets = !cfg.ShowWidgets; cfg.Save(); RebuildCells(); }, true, cfg.ShowWidgets));
         var style = new MenuItem { Header = "Clock Style" };
         foreach (var n in new[] { "Digital", "Analog", "Both" })
@@ -858,8 +1076,11 @@ internal class DockWindow : Window
         foreach (var c in cells) { c.Scale = c.Target = 1; c.ApplySize(Base); }
     }
 
+    public void OnAutoHideChanged() => ApplyAutoHide();
+
     public void Cleanup()
     {
+        hideTimer.Stop(); revealTimer.Stop(); leaveWatch.Stop();
         tick.Stop();
         debounce.Stop();
         foreach (var h in hooks) if (h != IntPtr.Zero) UnhookWinEvent(h);
@@ -918,13 +1139,30 @@ internal static class TaskbarControl
     {
         if (!Hidden) return;
         foreach (var h in TrayWindows())
+        {
+            // Windows re-shows its taskbar whenever Start opens, so hiding alone doesn't stick: it slid up over the dock.
+            // An empty window region keeps it invisible even while Windows considers it shown.
+            if (!shaped.Contains(h)) { SetWindowRgn(h, CreateRectRgn(0, 0, 0, 0), true); shaped.Add(h); }
             if (IsWindowVisible(h)) ShowWindow(h, 0 /* SW_HIDE */);
+        }
+    }
+
+    static readonly HashSet<IntPtr> shaped = new();
+
+    /// <summary>Opens the Start menu. Asking the taskbar directly is reliable; a synthetic Win key press from a
+    /// no-activate window was ignored about 2 times in 3.</summary>
+    public static void OpenStart()
+    {
+        var main = TrayWindows().FirstOrDefault(h => Native.GetClassName(h) == "Shell_TrayWnd");
+        if (main == IntPtr.Zero || !PostMessageW(main, 0x0112 /* WM_SYSCOMMAND */, (IntPtr)0xF130 /* SC_TASKLIST */, IntPtr.Zero))
+            PressKeys(VK_LWIN);
     }
 
     public static void Restore(Config cfg)
     {
         Hidden = false;
-        foreach (var h in TrayWindows()) ShowWindow(h, 5 /* SW_SHOW */);
+        foreach (var h in TrayWindows()) { SetWindowRgn(h, IntPtr.Zero, true); ShowWindow(h, 5 /* SW_SHOW */); }
+        shaped.Clear();
         if (cfg != null && cfg.OriginalTaskbarState >= 0)
         {
             SetState(cfg.OriginalTaskbarState);
@@ -936,7 +1174,7 @@ internal static class TaskbarControl
     public static void ForceRestore()
     {
         Hidden = false;
-        foreach (var h in TrayWindows()) ShowWindow(h, 5);
+        foreach (var h in TrayWindows()) { SetWindowRgn(h, IntPtr.Zero, true); ShowWindow(h, 5); }
         var cfg = Config.Load();
         SetState(cfg.OriginalTaskbarState >= 0 ? cfg.OriginalTaskbarState : 0);
         cfg.OriginalTaskbarState = -1; cfg.Save();
